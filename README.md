@@ -72,4 +72,4 @@ C:\Windows\System32\notepad.exe
 - `Shift + 方向键`：微调白名单列表位置
 - `Shift + + / -`：微调白名单图标大小
 
-白名单列表的位置和图标大小会保存到 `FocusClock.ini`。
+白名单列表的位置和图标大小会保存到 `FocusClock.ini`(会自动生成)。
