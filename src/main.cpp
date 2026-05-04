@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <cwctype>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -162,6 +163,7 @@ private:
     POINT whitelistDragStartOrigin_{};
     std::vector<UiButton> buttons_;
     std::vector<WhitelistEntry> whitelistEntries_;
+    std::map<HWND, LONG_PTR> promotedWindows_;
     FILETIME whitelistWriteTime_{};
     bool whitelistKnown_ = false;
 };
@@ -593,6 +595,15 @@ void FocusClockApp::FinishFocus() {
     pendingWhitelistIndex_ = -1;
     whitelistYieldUntil_ = std::chrono::steady_clock::time_point{};
     remainingSeconds_ = selectedMinutes_ * 60LL;
+
+    for (auto const& [hwnd, style] : promotedWindows_) {
+        if (IsWindow(hwnd)) {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style);
+            SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+    promotedWindows_.clear();
+
     MessageBeep(MB_OK);
     EnterFullscreenNotTopmost();
     RebuildLayout();
@@ -1187,6 +1198,10 @@ void FocusClockApp::BringWindowToFront(HWND target) {
 void FocusClockApp::PromoteWhitelistWindow(HWND target) {
     if (!target) {
         return;
+    }
+
+    if (promotedWindows_.find(target) == promotedWindows_.end()) {
+        promotedWindows_[target] = GetWindowLongPtrW(target, GWL_EXSTYLE);
     }
 
     LONG_PTR exStyle = GetWindowLongPtrW(target, GWL_EXSTYLE);
