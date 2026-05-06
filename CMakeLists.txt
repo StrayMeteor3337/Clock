@@ -10,7 +10,7 @@ add_executable(FocusClock WIN32
 )
 
 if(MINGW)
-    target_link_options(FocusClock PRIVATE -municode)
+    target_link_options(FocusClock PRIVATE -municode -static -static-libgcc -static-libstdc++)
 endif()
 
 target_compile_definitions(FocusClock PRIVATE
