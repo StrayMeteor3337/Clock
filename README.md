@@ -75,3 +75,7 @@ C:\Windows\System32\notepad.exe
 - `Shift + + / -`：微调白名单图标大小
 
 白名单列表的位置和图标大小会保存到 `FocusClock.ini`(会自动生成)。
+
+PS：项目太大，只能用AI维护，要没钱了qwq，可以赏饭吃吗，多少都行
+<img width="272" height="239" alt="image" src="https://github.com/user-attachments/assets/41a33586-c53e-4a33-8fe2-38b640355138" />
+<img width="427" height="427" alt="3" src="https://github.com/user-attachments/assets/f42285c3-8a46-4b03-a720-e574a49b541f" />
