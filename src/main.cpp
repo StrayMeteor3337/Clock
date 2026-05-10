@@ -24,7 +24,9 @@ constexpr int kClockTimerMs = 250;
 constexpr int kGuardTimerMs = 1000;
 constexpr double kPi = 3.14159265358979323846;
 constexpr int kMinFocusMinutes = 1;
-constexpr int kMaxFocusMinutes = 240;
+constexpr int kDefaultMaxFocusMinutes = 240;
+constexpr int kAbsoluteMaxFocusMinutes = 1440;
+constexpr int kDefaultFocusMinutes = 25;
 constexpr int kStartButtonId = 1001;
 constexpr int kExitButtonId = 1002;
 constexpr int kCustomMinusFiveId = 1101;
@@ -33,6 +35,24 @@ constexpr int kCustomPlusOneId = 1103;
 constexpr int kCustomPlusFiveId = 1104;
 constexpr int kCustomDisplayId = 1105;
 constexpr int kWhitelistButtonBaseId = 2000;
+constexpr int kWhitelistButtonLimit = 3000;
+constexpr int kPanelButtonBaseId = 3000;
+constexpr int kPanelCloseButtonId = 3001;
+constexpr int kPanelResetSettingsId = 3002;
+constexpr int kPanelTabButtonBaseId = 3100;
+constexpr int kPanelTabOverviewId = 1;
+constexpr int kPanelTabSettingsId = 2;
+constexpr int kSettingMaxMinusFiveId = 3201;
+constexpr int kSettingMaxMinusOneId = 3202;
+constexpr int kSettingMaxDisplayId = 3203;
+constexpr int kSettingMaxPlusOneId = 3204;
+constexpr int kSettingMaxPlusFiveId = 3205;
+constexpr int kSettingDefaultMinusFiveId = 3211;
+constexpr int kSettingDefaultMinusOneId = 3212;
+constexpr int kSettingDefaultDisplayId = 3213;
+constexpr int kSettingDefaultPlusOneId = 3214;
+constexpr int kSettingDefaultPlusFiveId = 3215;
+constexpr int kPanelHotkeyId = 4001;
 constexpr int kMinWhitelistIconSize = 48;
 constexpr int kMaxWhitelistIconSize = 120;
 constexpr int kDefaultWhitelistIconSize = 72;
@@ -63,6 +83,11 @@ struct UiButton {
     bool primary = false;
     bool danger = false;
     bool iconOnly = false;
+};
+
+struct PanelTabDefinition {
+    int id = 0;
+    const wchar_t* title = L"";
 };
 
 struct WhitelistEntry {
@@ -117,6 +142,20 @@ private:
     void ClampWhitelistLayout(int clientWidth, int clientHeight);
     void LoadWhitelistLayoutSettings();
     void SaveWhitelistLayoutSettings() const;
+    void LoadAppSettings();
+    void SaveAppSettings() const;
+    void ResetAppSettings();
+    void TogglePanel();
+    void ClosePanel();
+    void DrawPanel(Graphics& g, const RECT& rc);
+    void DrawOverviewTab(Graphics& g, const RectF& contentRect, const Theme& theme, FontFamily& family);
+    void DrawSettingsTab(Graphics& g, const RectF& contentRect, const Theme& theme, FontFamily& family);
+    void AddPanelButton(int id, const RECT& rect, const std::wstring& label, bool selected = false, bool enabled = true, bool primary = false, bool danger = false);
+    void AddStepperButtons(int minusFiveId, int minusOneId, int displayId, int plusOneId, int plusFiveId, int left, int top, int value, const std::wstring& suffix, bool canDecrease, bool canIncrease);
+    void HandlePanelCommand(int id);
+    void SetMaxFocusMinutes(int minutes);
+    void SetDefaultFocusMinutes(int minutes);
+    std::wstring GetSettingsPath() const;
     void OpenWhitelistEntry(size_t index);
     HWND FindRunningWhitelistWindow(const WhitelistEntry& entry) const;
     void BringWindowToFront(HWND target);
@@ -147,9 +186,15 @@ private:
     ULONG_PTR gdiplusToken_ = 0;
     bool darkMode_ = false;
     bool focusActive_ = false;
+    bool panelOpen_ = false;
     HWND activeWhitelistWindow_ = nullptr;
-    int selectedMinutes_ = 25;
-    long long remainingSeconds_ = 25 * 60;
+    int maxFocusMinutes_ = kDefaultMaxFocusMinutes;
+    int defaultFocusMinutes_ = kDefaultFocusMinutes;
+    int selectedMinutes_ = kDefaultFocusMinutes;
+    long long remainingSeconds_ = kDefaultFocusMinutes * 60;
+    int activePanelTab_ = kPanelTabSettingsId;
+    RECT panelBounds_{};
+    std::vector<PanelTabDefinition> panelTabs_{ { kPanelTabOverviewId, L"概览" }, { kPanelTabSettingsId, L"设置" } };
     std::chrono::steady_clock::time_point focusEnd_{};
     std::chrono::steady_clock::time_point whitelistYieldUntil_{};
     int pendingWhitelistIndex_ = -1;
@@ -229,6 +274,7 @@ bool FocusClockApp::Create(HINSTANCE instance, int show) {
     }
 
     RefreshTheme();
+    LoadAppSettings();
     LoadWhitelistIfNeeded(true);
     LoadWhitelistLayoutSettings();
     ApplyDarkMode();
@@ -237,6 +283,7 @@ bool FocusClockApp::Create(HINSTANCE instance, int show) {
     ShowWindow(hwnd_, show);
     UpdateWindow(hwnd_);
 
+    RegisterHotKey(hwnd_, kPanelHotkeyId, 0, VK_F6);
     SetTimer(hwnd_, kClockTimer, kClockTimerMs, nullptr);
     SetTimer(hwnd_, kGuardTimer, kGuardTimerMs, nullptr);
     return true;
@@ -324,6 +371,22 @@ LRESULT FocusClockApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
         return DefWindowProcW(hwnd, msg, wparam, lparam);
 
     case WM_KEYDOWN:
+        if (wparam == VK_F6) {
+            if (!focusActive_) {
+                TogglePanel();
+            } else {
+                MessageBeep(MB_ICONINFORMATION);
+            }
+            return 0;
+        }
+
+        if (panelOpen_) {
+            if (wparam == VK_ESCAPE) {
+                ClosePanel();
+            }
+            return 0;
+        }
+
         if (IsShiftDown()) {
             bool handled = true;
             switch (wparam) {
@@ -364,6 +427,19 @@ LRESULT FocusClockApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
         }
         return 0;
 
+    case WM_HOTKEY:
+        if (wparam == kPanelHotkeyId) {
+            if (!focusActive_) {
+                TogglePanel();
+                ShowWindow(hwnd_, SW_SHOW);
+                SetForegroundWindow(hwnd_);
+            } else {
+                MessageBeep(MB_ICONINFORMATION);
+            }
+            return 0;
+        }
+        return 0;
+
     case WM_SYSKEYDOWN:
         if (wparam == VK_F4 && focusActive_) {
             return 0;
@@ -371,6 +447,9 @@ LRESULT FocusClockApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
         return DefWindowProcW(hwnd, msg, wparam, lparam);
 
     case WM_LBUTTONDOWN: {
+        if (panelOpen_) {
+            return 0;
+        }
         POINT pt{ GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
         if (BeginWhitelistDrag(pt)) {
             return 0;
@@ -401,6 +480,9 @@ LRESULT FocusClockApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
     }
 
     case WM_MOUSEWHEEL: {
+        if (panelOpen_) {
+            return 0;
+        }
         if (IsShiftDown()) {
             POINT pt{ GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam) };
             ScreenToClient(hwnd, &pt);
@@ -426,6 +508,7 @@ LRESULT FocusClockApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
         return 0;
 
     case WM_DESTROY:
+        UnregisterHotKey(hwnd, kPanelHotkeyId);
         KillTimer(hwnd, kClockTimer);
         KillTimer(hwnd, kGuardTimer);
         PostQuitMessage(0);
@@ -581,6 +664,7 @@ void FocusClockApp::RefreshTheme() {
 }
 
 void FocusClockApp::StartFocus() {
+    ClosePanel();
     focusActive_ = true;
     remainingSeconds_ = selectedMinutes_ * 60LL;
     focusEnd_ = std::chrono::steady_clock::now() + std::chrono::seconds(remainingSeconds_);
@@ -634,6 +718,7 @@ void FocusClockApp::RebuildLayout() {
             b.rect = RECT{ left, bottom - buttonHeight - 178, left + durationWidth, bottom - 178 };
             b.label = std::to_wstring(minutes[i]) + L" 分钟";
             b.id = minutes[i];
+            b.enabled = minutes[i] <= maxFocusMinutes_;
             b.selected = selectedMinutes_ == minutes[i];
             buttons_.push_back(b);
         }
@@ -665,7 +750,7 @@ void FocusClockApp::RebuildLayout() {
             } else if (custom.id == kCustomMinusFiveId || custom.id == kCustomMinusOneId) {
                 custom.enabled = selectedMinutes_ > kMinFocusMinutes;
             } else {
-                custom.enabled = selectedMinutes_ < kMaxFocusMinutes;
+                custom.enabled = selectedMinutes_ < maxFocusMinutes_;
             }
             buttons_.push_back(custom);
             customLeft += buttonWidth + gap;
@@ -684,6 +769,72 @@ void FocusClockApp::RebuildLayout() {
         exit.id = kExitButtonId;
         exit.danger = true;
         buttons_.push_back(exit);
+    }
+
+    if (panelOpen_ && !focusActive_) {
+        int panelWidth = std::min(760, std::max(520, width - 96));
+        int panelHeight = std::min(560, std::max(420, height - 120));
+        int left = (width - panelWidth) / 2;
+        int top = (height - panelHeight) / 2;
+        panelBounds_ = RECT{ left, top, left + panelWidth, top + panelHeight };
+
+        UiButton close{};
+        close.rect = RECT{ panelBounds_.right - 58, panelBounds_.top + 24, panelBounds_.right - 24, panelBounds_.top + 58 };
+        close.label = L"×";
+        close.id = kPanelCloseButtonId;
+        close.danger = true;
+        buttons_.push_back(close);
+
+        int tabLeft = panelBounds_.left + 32;
+        int tabTop = panelBounds_.top + 84;
+        for (size_t i = 0; i < panelTabs_.size(); ++i) {
+            UiButton tab{};
+            tab.rect = RECT{ tabLeft, tabTop + static_cast<int>(i) * 52, tabLeft + 148, tabTop + static_cast<int>(i) * 52 + 40 };
+            tab.label = panelTabs_[i].title;
+            tab.id = kPanelTabButtonBaseId + panelTabs_[i].id;
+            tab.selected = activePanelTab_ == panelTabs_[i].id;
+            buttons_.push_back(tab);
+        }
+
+        if (activePanelTab_ == kPanelTabSettingsId) {
+            int contentLeft = panelBounds_.left + 216;
+            AddStepperButtons(
+                kSettingMaxMinusFiveId,
+                kSettingMaxMinusOneId,
+                kSettingMaxDisplayId,
+                kSettingMaxPlusOneId,
+                kSettingMaxPlusFiveId,
+                contentLeft,
+                panelBounds_.top + 206,
+                maxFocusMinutes_,
+                L" 分钟",
+                maxFocusMinutes_ > kMinFocusMinutes,
+                maxFocusMinutes_ < kAbsoluteMaxFocusMinutes);
+
+            AddStepperButtons(
+                kSettingDefaultMinusFiveId,
+                kSettingDefaultMinusOneId,
+                kSettingDefaultDisplayId,
+                kSettingDefaultPlusOneId,
+                kSettingDefaultPlusFiveId,
+                contentLeft,
+                panelBounds_.top + 350,
+                defaultFocusMinutes_,
+                L" 分钟",
+                defaultFocusMinutes_ > kMinFocusMinutes,
+                defaultFocusMinutes_ < maxFocusMinutes_);
+
+            AddPanelButton(
+                kPanelResetSettingsId,
+                RECT{ contentLeft, panelBounds_.bottom - 82, contentLeft + 154, panelBounds_.bottom - 38 },
+                L"恢复默认",
+                false,
+                true,
+                false,
+                true);
+        }
+    } else {
+        panelBounds_ = RECT{};
     }
 
     const int appButtonSize = whitelistIconSize_;
@@ -799,7 +950,7 @@ void FocusClockApp::Paint() {
     }
 
     auto appButton = std::find_if(buttons_.begin(), buttons_.end(), [](const UiButton& button) {
-        return button.id >= 2000;
+        return button.id >= kWhitelistButtonBaseId && button.id < kWhitelistButtonLimit;
     });
     if (appButton != buttons_.end()) {
         Font appTitleFont(&family, 18, FontStyleRegular, UnitPixel);
@@ -813,6 +964,15 @@ void FocusClockApp::Paint() {
 
     for (const auto& button : buttons_) {
         DrawButton(g, button);
+    }
+
+    if (panelOpen_ && !focusActive_) {
+        DrawPanel(g, rc);
+        for (const auto& button : buttons_) {
+            if (button.id >= kPanelButtonBaseId) {
+                DrawButton(g, button);
+            }
+        }
     }
 
     BitBlt(hdc, 0, 0, width, height, mem, 0, 0, SRCCOPY);
@@ -897,6 +1057,92 @@ void FocusClockApp::DrawTextBlock(Graphics& g, const std::wstring& text, const R
     format.SetTrimming(StringTrimmingEllipsisCharacter);
     SolidBrush brush(color);
     g.DrawString(text.c_str(), static_cast<INT>(text.size()), &font, rect, &format, &brush);
+}
+
+void FocusClockApp::DrawPanel(Graphics& g, const RECT& rc) {
+    Theme theme{
+        darkMode_ ? Color(255, 11, 15, 20) : Color(255, 245, 247, 250),
+        darkMode_ ? Color(255, 24, 30, 39) : Color(255, 255, 255, 255),
+        darkMode_ ? Color(255, 242, 245, 247) : Color(255, 24, 28, 35),
+        darkMode_ ? Color(255, 178, 187, 199) : Color(255, 79, 88, 103),
+        darkMode_ ? Color(255, 119, 131, 146) : Color(255, 104, 116, 132),
+        darkMode_ ? Color(255, 89, 180, 255) : Color(255, 0, 113, 188),
+        darkMode_ ? Color(50, 89, 180, 255) : Color(32, 0, 113, 188),
+        darkMode_ ? Color(255, 255, 115, 115) : Color(255, 190, 46, 46),
+        darkMode_ ? Color(255, 54, 64, 78) : Color(255, 214, 220, 228)
+    };
+
+    SolidBrush scrim(darkMode_ ? Color(170, 0, 0, 0) : Color(125, 22, 29, 38));
+    g.FillRectangle(
+        &scrim,
+        static_cast<INT>(rc.left),
+        static_cast<INT>(rc.top),
+        static_cast<INT>(rc.right - rc.left),
+        static_cast<INT>(rc.bottom - rc.top));
+
+    RectF panel(
+        static_cast<REAL>(panelBounds_.left),
+        static_cast<REAL>(panelBounds_.top),
+        static_cast<REAL>(panelBounds_.right - panelBounds_.left),
+        static_cast<REAL>(panelBounds_.bottom - panelBounds_.top));
+
+    GraphicsPath path;
+    const REAL radius = 10.0f;
+    path.AddArc(panel.X, panel.Y, radius * 2, radius * 2, 180, 90);
+    path.AddArc(panel.X + panel.Width - radius * 2, panel.Y, radius * 2, radius * 2, 270, 90);
+    path.AddArc(panel.X + panel.Width - radius * 2, panel.Y + panel.Height - radius * 2, radius * 2, radius * 2, 0, 90);
+    path.AddArc(panel.X, panel.Y + panel.Height - radius * 2, radius * 2, radius * 2, 90, 90);
+    path.CloseFigure();
+
+    SolidBrush panelBrush(theme.panel);
+    Pen borderPen(theme.line, 1.5f);
+    g.FillPath(&panelBrush, &path);
+    g.DrawPath(&borderPen, &path);
+
+    FontFamily family(L"Segoe UI");
+    Font titleFont(&family, 26, FontStyleRegular, UnitPixel);
+    Font hintFont(&family, 15, FontStyleRegular, UnitPixel);
+    RectF titleRect(panel.X + 32.0f, panel.Y + 24.0f, panel.Width - 112.0f, 34.0f);
+    DrawTextBlock(g, L"功能面板", titleRect, titleFont, theme.primaryText, StringAlignmentNear, StringAlignmentCenter);
+
+    RectF hintRect(panel.X + 32.0f, panel.Y + 56.0f, panel.Width - 112.0f, 22.0f);
+    DrawTextBlock(g, L"按 F6 或 Esc 关闭，专注时段不可打开", hintRect, hintFont, theme.mutedText, StringAlignmentNear, StringAlignmentCenter);
+
+    Pen divider(theme.line, 1.0f);
+    g.DrawLine(&divider, PointF(panel.X + 184.0f, panel.Y + 84.0f), PointF(panel.X + 184.0f, panel.Y + panel.Height - 32.0f));
+
+    RectF contentRect(panel.X + 216.0f, panel.Y + 92.0f, panel.Width - 248.0f, panel.Height - 126.0f);
+    if (activePanelTab_ == kPanelTabOverviewId) {
+        DrawOverviewTab(g, contentRect, theme, family);
+    } else if (activePanelTab_ == kPanelTabSettingsId) {
+        DrawSettingsTab(g, contentRect, theme, family);
+    }
+}
+
+void FocusClockApp::DrawOverviewTab(Graphics& g, const RectF& contentRect, const Theme& theme, FontFamily& family) {
+    Font headingFont(&family, 24, FontStyleRegular, UnitPixel);
+    Font bodyFont(&family, 17, FontStyleRegular, UnitPixel);
+    Font smallFont(&family, 15, FontStyleRegular, UnitPixel);
+
+    DrawTextBlock(g, L"概览", RectF(contentRect.X, contentRect.Y, contentRect.Width, 34.0f), headingFont, theme.primaryText, StringAlignmentNear, StringAlignmentCenter);
+    DrawTextBlock(g, L"这里是可扩展标签页框架的占位页，后续功能可以通过新增标签定义接入。", RectF(contentRect.X, contentRect.Y + 48.0f, contentRect.Width, 60.0f), bodyFont, theme.secondaryText, StringAlignmentNear, StringAlignmentNear);
+
+    std::wstring summary = L"当前默认时长 " + std::to_wstring(defaultFocusMinutes_) + L" 分钟，最大时长 " + std::to_wstring(maxFocusMinutes_) + L" 分钟。";
+    DrawTextBlock(g, summary, RectF(contentRect.X, contentRect.Y + 132.0f, contentRect.Width, 28.0f), smallFont, theme.mutedText, StringAlignmentNear, StringAlignmentCenter);
+}
+
+void FocusClockApp::DrawSettingsTab(Graphics& g, const RectF& contentRect, const Theme& theme, FontFamily& family) {
+    Font headingFont(&family, 24, FontStyleRegular, UnitPixel);
+    Font labelFont(&family, 18, FontStyleRegular, UnitPixel);
+    Font helpFont(&family, 15, FontStyleRegular, UnitPixel);
+
+    DrawTextBlock(g, L"设置", RectF(contentRect.X, contentRect.Y, contentRect.Width, 34.0f), headingFont, theme.primaryText, StringAlignmentNear, StringAlignmentCenter);
+
+    DrawTextBlock(g, L"最大专注时长", RectF(contentRect.X, contentRect.Y + 58.0f, contentRect.Width, 28.0f), labelFont, theme.primaryText, StringAlignmentNear, StringAlignmentCenter);
+    DrawTextBlock(g, L"控制自定义时长可调到的上限，保存到 FocusClock.ini。", RectF(contentRect.X, contentRect.Y + 88.0f, contentRect.Width, 26.0f), helpFont, theme.mutedText, StringAlignmentNear, StringAlignmentCenter);
+
+    DrawTextBlock(g, L"默认专注时长", RectF(contentRect.X, contentRect.Y + 202.0f, contentRect.Width, 28.0f), labelFont, theme.primaryText, StringAlignmentNear, StringAlignmentCenter);
+    DrawTextBlock(g, L"启动时和恢复默认时使用的时长，会自动受最大时长限制。", RectF(contentRect.X, contentRect.Y + 232.0f, contentRect.Width, 26.0f), helpFont, theme.mutedText, StringAlignmentNear, StringAlignmentCenter);
 }
 
 void FocusClockApp::DrawButton(Graphics& g, const UiButton& button) {
@@ -987,6 +1233,19 @@ void FocusClockApp::DrawButtonIcon(Graphics& g, const UiButton& button, const Re
 }
 
 void FocusClockApp::HitTestAndClick(POINT pt) {
+    if (panelOpen_) {
+        for (const auto& button : buttons_) {
+            if (button.id < kPanelButtonBaseId || !button.enabled || !PtInRect(&button.rect, pt)) {
+                continue;
+            }
+
+            HandlePanelCommand(button.id);
+            return;
+        }
+
+        return;
+    }
+
     for (const auto& button : buttons_) {
         if (!button.enabled || !PtInRect(&button.rect, pt)) {
             continue;
@@ -1007,19 +1266,19 @@ void FocusClockApp::HitTestAndClick(POINT pt) {
             RebuildLayout();
             InvalidateRect(hwnd_, nullptr, FALSE);
         } else if (button.id == kCustomPlusOneId) {
-            selectedMinutes_ = std::min(kMaxFocusMinutes, selectedMinutes_ + 1);
+            selectedMinutes_ = std::min(maxFocusMinutes_, selectedMinutes_ + 1);
             remainingSeconds_ = selectedMinutes_ * 60LL;
             RebuildLayout();
             InvalidateRect(hwnd_, nullptr, FALSE);
         } else if (button.id == kCustomPlusFiveId) {
-            selectedMinutes_ = std::min(kMaxFocusMinutes, selectedMinutes_ + 5);
+            selectedMinutes_ = std::min(maxFocusMinutes_, selectedMinutes_ + 5);
             remainingSeconds_ = selectedMinutes_ * 60LL;
             RebuildLayout();
             InvalidateRect(hwnd_, nullptr, FALSE);
-        } else if (button.id >= kWhitelistButtonBaseId) {
+        } else if (button.id >= kWhitelistButtonBaseId && button.id < kWhitelistButtonLimit) {
             OpenWhitelistEntry(static_cast<size_t>(button.id - kWhitelistButtonBaseId));
         } else {
-            selectedMinutes_ = std::clamp(button.id, kMinFocusMinutes, kMaxFocusMinutes);
+            selectedMinutes_ = std::clamp(button.id, kMinFocusMinutes, maxFocusMinutes_);
             remainingSeconds_ = selectedMinutes_ * 60LL;
             RebuildLayout();
             InvalidateRect(hwnd_, nullptr, FALSE);
@@ -1140,6 +1399,134 @@ void FocusClockApp::SaveWhitelistLayoutSettings() const {
 
     swprintf_s(buffer, L"%d", whitelistIconSize_);
     WritePrivateProfileStringW(L"Whitelist", L"IconSize", buffer, path.c_str());
+}
+
+void FocusClockApp::LoadAppSettings() {
+    std::wstring path = GetSettingsPath();
+    maxFocusMinutes_ = GetPrivateProfileIntW(L"Focus", L"MaxMinutes", kDefaultMaxFocusMinutes, path.c_str());
+    maxFocusMinutes_ = std::clamp(maxFocusMinutes_, kMinFocusMinutes, kAbsoluteMaxFocusMinutes);
+
+    defaultFocusMinutes_ = GetPrivateProfileIntW(L"Focus", L"DefaultMinutes", kDefaultFocusMinutes, path.c_str());
+    defaultFocusMinutes_ = std::clamp(defaultFocusMinutes_, kMinFocusMinutes, maxFocusMinutes_);
+
+    selectedMinutes_ = defaultFocusMinutes_;
+    remainingSeconds_ = selectedMinutes_ * 60LL;
+}
+
+void FocusClockApp::SaveAppSettings() const {
+    std::wstring path = GetSettingsPath();
+    wchar_t buffer[32]{};
+
+    swprintf_s(buffer, L"%d", maxFocusMinutes_);
+    WritePrivateProfileStringW(L"Focus", L"MaxMinutes", buffer, path.c_str());
+
+    swprintf_s(buffer, L"%d", defaultFocusMinutes_);
+    WritePrivateProfileStringW(L"Focus", L"DefaultMinutes", buffer, path.c_str());
+}
+
+void FocusClockApp::ResetAppSettings() {
+    SetMaxFocusMinutes(kDefaultMaxFocusMinutes);
+    SetDefaultFocusMinutes(kDefaultFocusMinutes);
+}
+
+void FocusClockApp::TogglePanel() {
+    if (focusActive_) {
+        return;
+    }
+
+    panelOpen_ = !panelOpen_;
+    RebuildLayout();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void FocusClockApp::ClosePanel() {
+    if (!panelOpen_) {
+        return;
+    }
+
+    panelOpen_ = false;
+    RebuildLayout();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void FocusClockApp::AddPanelButton(int id, const RECT& rect, const std::wstring& label, bool selected, bool enabled, bool primary, bool danger) {
+    UiButton button{};
+    button.rect = rect;
+    button.label = label;
+    button.id = id;
+    button.selected = selected;
+    button.enabled = enabled;
+    button.primary = primary;
+    button.danger = danger;
+    buttons_.push_back(button);
+}
+
+void FocusClockApp::AddStepperButtons(int minusFiveId, int minusOneId, int displayId, int plusOneId, int plusFiveId, int left, int top, int value, const std::wstring& suffix, bool canDecrease, bool canIncrease) {
+    const int buttonHeight = 44;
+    const int smallWidth = 58;
+    const int displayWidth = 170;
+    const int gap = 10;
+
+    AddPanelButton(minusFiveId, RECT{ left, top, left + smallWidth, top + buttonHeight }, L"-5", false, canDecrease);
+    left += smallWidth + gap;
+    AddPanelButton(minusOneId, RECT{ left, top, left + smallWidth, top + buttonHeight }, L"-1", false, canDecrease);
+    left += smallWidth + gap;
+    AddPanelButton(displayId, RECT{ left, top, left + displayWidth, top + buttonHeight }, std::to_wstring(value) + suffix, true, false);
+    left += displayWidth + gap;
+    AddPanelButton(plusOneId, RECT{ left, top, left + smallWidth, top + buttonHeight }, L"+1", false, canIncrease);
+    left += smallWidth + gap;
+    AddPanelButton(plusFiveId, RECT{ left, top, left + smallWidth, top + buttonHeight }, L"+5", false, canIncrease);
+}
+
+void FocusClockApp::HandlePanelCommand(int id) {
+    if (id == kPanelCloseButtonId) {
+        ClosePanel();
+    } else if (id >= kPanelTabButtonBaseId && id < kSettingMaxMinusFiveId) {
+        activePanelTab_ = id - kPanelTabButtonBaseId;
+        RebuildLayout();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    } else if (id == kPanelResetSettingsId) {
+        ResetAppSettings();
+    } else if (id == kSettingMaxMinusFiveId) {
+        SetMaxFocusMinutes(maxFocusMinutes_ - 5);
+    } else if (id == kSettingMaxMinusOneId) {
+        SetMaxFocusMinutes(maxFocusMinutes_ - 1);
+    } else if (id == kSettingMaxPlusOneId) {
+        SetMaxFocusMinutes(maxFocusMinutes_ + 1);
+    } else if (id == kSettingMaxPlusFiveId) {
+        SetMaxFocusMinutes(maxFocusMinutes_ + 5);
+    } else if (id == kSettingDefaultMinusFiveId) {
+        SetDefaultFocusMinutes(defaultFocusMinutes_ - 5);
+    } else if (id == kSettingDefaultMinusOneId) {
+        SetDefaultFocusMinutes(defaultFocusMinutes_ - 1);
+    } else if (id == kSettingDefaultPlusOneId) {
+        SetDefaultFocusMinutes(defaultFocusMinutes_ + 1);
+    } else if (id == kSettingDefaultPlusFiveId) {
+        SetDefaultFocusMinutes(defaultFocusMinutes_ + 5);
+    }
+}
+
+void FocusClockApp::SetMaxFocusMinutes(int minutes) {
+    maxFocusMinutes_ = std::clamp(minutes, kMinFocusMinutes, kAbsoluteMaxFocusMinutes);
+    defaultFocusMinutes_ = std::clamp(defaultFocusMinutes_, kMinFocusMinutes, maxFocusMinutes_);
+    selectedMinutes_ = std::clamp(selectedMinutes_, kMinFocusMinutes, maxFocusMinutes_);
+    remainingSeconds_ = selectedMinutes_ * 60LL;
+    SaveAppSettings();
+    RebuildLayout();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void FocusClockApp::SetDefaultFocusMinutes(int minutes) {
+    defaultFocusMinutes_ = std::clamp(minutes, kMinFocusMinutes, maxFocusMinutes_);
+    selectedMinutes_ = defaultFocusMinutes_;
+    remainingSeconds_ = selectedMinutes_ * 60LL;
+    SaveAppSettings();
+    RebuildLayout();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+std::wstring FocusClockApp::GetSettingsPath() const {
+    return GetExecutableDirectory() + L"\\FocusClock.ini";
 }
 
 void FocusClockApp::OpenWhitelistEntry(size_t index) {
