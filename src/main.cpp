@@ -20,8 +20,11 @@ namespace {
 
 constexpr UINT_PTR kClockTimer = 1;
 constexpr UINT_PTR kGuardTimer = 2;
+constexpr UINT_PTR kWhitelistLayoutTimer = 3;
 constexpr int kClockTimerMs = 250;
 constexpr int kGuardTimerMs = 1000;
+constexpr int kWhitelistLayoutTimerMs = 2;
+constexpr DWORD kWhitelistLayoutSaveDelayMs = 700;
 constexpr double kPi = 3.14159265358979323846;
 constexpr int kMinFocusMinutes = 1;
 constexpr int kDefaultMaxFocusMinutes = 240;
@@ -42,6 +45,7 @@ constexpr int kPanelResetSettingsId = 3002;
 constexpr int kPanelTabButtonBaseId = 3100;
 constexpr int kPanelTabOverviewId = 1;
 constexpr int kPanelTabSettingsId = 2;
+constexpr int kPanelTabScheduleId = 3;
 constexpr int kSettingMaxMinusFiveId = 3201;
 constexpr int kSettingMaxMinusOneId = 3202;
 constexpr int kSettingMaxDisplayId = 3203;
@@ -52,6 +56,21 @@ constexpr int kSettingDefaultMinusOneId = 3212;
 constexpr int kSettingDefaultDisplayId = 3213;
 constexpr int kSettingDefaultPlusOneId = 3214;
 constexpr int kSettingDefaultPlusFiveId = 3215;
+constexpr int kScheduleStartHourMinusId = 3301;
+constexpr int kScheduleStartHourDisplayId = 3302;
+constexpr int kScheduleStartHourPlusId = 3303;
+constexpr int kScheduleStartMinuteMinusId = 3304;
+constexpr int kScheduleStartMinuteDisplayId = 3305;
+constexpr int kScheduleStartMinutePlusId = 3306;
+constexpr int kScheduleEndHourMinusId = 3311;
+constexpr int kScheduleEndHourDisplayId = 3312;
+constexpr int kScheduleEndHourPlusId = 3313;
+constexpr int kScheduleEndMinuteMinusId = 3314;
+constexpr int kScheduleEndMinuteDisplayId = 3315;
+constexpr int kScheduleEndMinutePlusId = 3316;
+constexpr int kScheduleAddTaskId = 3320;
+constexpr int kScheduleDeleteButtonBaseId = 3400;
+constexpr int kScheduleDeleteButtonLimit = 3600;
 constexpr int kPanelHotkeyId = 4001;
 constexpr int kMinWhitelistIconSize = 48;
 constexpr int kMaxWhitelistIconSize = 120;
@@ -98,6 +117,12 @@ struct WhitelistEntry {
     std::wstring label;
 };
 
+struct ScheduledFocusTask {
+    int startMinute = 9 * 60;
+    int endMinute = 9 * 60 + kDefaultFocusMinutes;
+    int lastStartedDate = 0;
+};
+
 class FocusClockApp;
 
 struct FindWindowContext {
@@ -126,6 +151,7 @@ private:
     void RefreshTheme();
     bool LoadWhitelistIfNeeded(bool force = false);
     void StartFocus();
+    void StartFocusForSeconds(long long durationSeconds);
     void FinishFocus();
     void RebuildLayout();
     void Paint();
@@ -143,6 +169,10 @@ private:
     bool IsPointInWhitelistArea(POINT pt) const;
     void MoveWhitelistLayout(int dx, int dy);
     void ResizeWhitelistLayout(int delta);
+    void RebuildWhitelistLayoutOnly();
+    void MarkWhitelistLayoutChanged(bool needsRebuild);
+    void ProcessPendingWhitelistLayout(bool forceSave = false);
+    void InvalidateWhitelistArea(const RECT& previousBounds);
     void ClampWhitelistLayout(int clientWidth, int clientHeight);
     void LoadWhitelistLayoutSettings();
     void SaveWhitelistLayoutSettings() const;
@@ -154,16 +184,35 @@ private:
     void DrawPanel(Graphics& g, const RECT& rc);
     void DrawOverviewTab(Graphics& g, const RectF& contentRect, const Theme& theme, FontFamily& family);
     void DrawSettingsTab(Graphics& g, const RectF& contentRect, const Theme& theme, FontFamily& family);
+    void DrawScheduleTab(Graphics& g, const RectF& contentRect, const Theme& theme, FontFamily& family);
     void AddPanelButton(int id, const RECT& rect, const std::wstring& label, bool selected = false, bool enabled = true, bool primary = false, bool danger = false);
     void AddStepperButtons(int minusFiveId, int minusOneId, int displayId, int plusOneId, int plusFiveId, int left, int top, int value, const std::wstring& suffix, bool canDecrease, bool canIncrease);
+    void AddTimeStepperButtons(int minusId, int displayId, int plusId, int left, int top, int value, int maxValue, const std::wstring& suffix);
     void HandlePanelCommand(int id);
     void SetMaxFocusMinutes(int minutes);
     void SetDefaultFocusMinutes(int minutes);
+    void AdjustScheduleDraft(int id);
+    void AddScheduledFocusTask();
+    void DeleteScheduledFocusTask(size_t index);
+    void ScrollScheduleTab(int delta);
+    int ScheduleContentMaxScroll() const;
+    RECT PanelContentViewport() const;
+    void LoadScheduledFocusTasks();
+    void SaveScheduledFocusTasks() const;
+    void CheckScheduledFocusTasks(bool forceResumeActiveRange = false);
+    bool HasScheduleConflict(int startMinute, int endMinute, int ignoreIndex = -1) const;
+    bool IsValidScheduleRange(int startMinute, int endMinute) const;
+    int ScheduleDraftStartMinute() const;
+    int ScheduleDraftEndMinute() const;
+    std::wstring FormatMinuteOfDay(int minute) const;
+    static int DateStamp(const SYSTEMTIME& time);
     std::wstring GetSettingsPath() const;
     void OpenWhitelistEntry(size_t index);
     HWND FindRunningWhitelistWindow(const WhitelistEntry& entry) const;
     void BringWindowToFront(HWND target);
     void PromoteWhitelistWindow(HWND target);
+    void RestorePromotedWhitelistWindows();
+    void RestoreWhitelistWindow(HWND target, LONG_PTR savedStyle);
     bool IsTrackedWhitelistWindowValid() const;
     bool TryResolvePendingWhitelistWindow();
     void UpdateRemaining();
@@ -184,6 +233,7 @@ private:
     static HICON LoadIconForPath(const std::wstring& path);
     static std::wstring DecodeTextFile(const std::vector<char>& bytes);
     static BOOL CALLBACK EnumWhitelistWindows(HWND window, LPARAM param);
+    static BOOL CALLBACK EnumWhitelistedWindowsForRestore(HWND window, LPARAM param);
 
     HWND hwnd_ = nullptr;
     HINSTANCE instance_ = nullptr;
@@ -199,7 +249,15 @@ private:
     long long remainingSeconds_ = kDefaultFocusMinutes * 60;
     int activePanelTab_ = kPanelTabSettingsId;
     RECT panelBounds_{};
-    std::vector<PanelTabDefinition> panelTabs_{ { kPanelTabOverviewId, L"概览" }, { kPanelTabSettingsId, L"设置" } };
+    std::vector<PanelTabDefinition> panelTabs_{ { kPanelTabOverviewId, L"概览" }, { kPanelTabScheduleId, L"计划" }, { kPanelTabSettingsId, L"设置" } };
+    std::vector<ScheduledFocusTask> scheduledTasks_;
+    int scheduleScrollOffset_ = 0;
+    int scheduleDraftStartHour_ = 9;
+    int scheduleDraftStartMinute_ = 0;
+    int scheduleDraftEndHour_ = 9;
+    int scheduleDraftEndMinute_ = 25;
+    std::wstring scheduleMessage_;
+    bool scheduleMessageIsError_ = false;
     std::chrono::steady_clock::time_point focusEnd_{};
     std::chrono::steady_clock::time_point whitelistYieldUntil_{};
     int pendingWhitelistIndex_ = -1;
@@ -207,6 +265,11 @@ private:
     int whitelistTop_ = 92;
     int whitelistIconSize_ = kDefaultWhitelistIconSize;
     RECT whitelistBounds_{};
+    RECT previousWhitelistBounds_{};
+    bool whitelistLayoutDirty_ = false;
+    bool whitelistLayoutNeedsRebuild_ = false;
+    bool whitelistLayoutSavePending_ = false;
+    DWORD whitelistLayoutLastChangeTick_ = 0;
     bool whitelistDragging_ = false;
     bool whitelistDragMoved_ = false;
     POINT whitelistDragStartPt_{};
@@ -282,6 +345,7 @@ bool FocusClockApp::Create(HINSTANCE instance, int show) {
 
     RefreshTheme();
     LoadAppSettings();
+    LoadScheduledFocusTasks();
     LoadWhitelistIfNeeded(true);
     LoadWhitelistLayoutSettings();
     ApplyDarkMode();
@@ -293,6 +357,7 @@ bool FocusClockApp::Create(HINSTANCE instance, int show) {
     RegisterHotKey(hwnd_, kPanelHotkeyId, 0, VK_F6);
     SetTimer(hwnd_, kClockTimer, kClockTimerMs, nullptr);
     SetTimer(hwnd_, kGuardTimer, kGuardTimerMs, nullptr);
+    CheckScheduledFocusTasks(true);
     return true;
 }
 
@@ -364,6 +429,7 @@ LRESULT FocusClockApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
                 RebuildLayout();
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
+            CheckScheduledFocusTasks();
             if (focusActive_) {
                 TryResolvePendingWhitelistWindow();
                 if ((ShouldYieldToWhitelist() || IsWhitelistedForegroundWindow()) && IsTrackedWhitelistWindowValid()) {
@@ -374,6 +440,8 @@ LRESULT FocusClockApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
                 }
             }
             RefreshTheme();
+        } else if (wparam == kWhitelistLayoutTimer) {
+            ProcessPendingWhitelistLayout();
         }
         return 0;
 
@@ -503,6 +571,10 @@ LRESULT FocusClockApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
 
     case WM_MOUSEWHEEL: {
         if (panelOpen_) {
+            if (activePanelTab_ == kPanelTabScheduleId) {
+                int delta = GET_WHEEL_DELTA_WPARAM(wparam) > 0 ? -48 : 48;
+                ScrollScheduleTab(delta);
+            }
             return 0;
         }
         if (IsShiftDown()) {
@@ -530,6 +602,8 @@ LRESULT FocusClockApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
         return 0;
 
     case WM_DESTROY:
+        ProcessPendingWhitelistLayout(true);
+        KillTimer(hwnd, kWhitelistLayoutTimer);
         RemoveFocusKeyboardHook();
         UnregisterHotKey(hwnd, kPanelHotkeyId);
         KillTimer(hwnd, kClockTimer);
@@ -732,10 +806,14 @@ void FocusClockApp::RefreshTheme() {
 }
 
 void FocusClockApp::StartFocus() {
+    StartFocusForSeconds(selectedMinutes_ * 60LL);
+}
+
+void FocusClockApp::StartFocusForSeconds(long long durationSeconds) {
     ClosePanel();
     focusActive_ = true;
     InstallFocusKeyboardHook();
-    remainingSeconds_ = selectedMinutes_ * 60LL;
+    remainingSeconds_ = std::max(1LL, durationSeconds);
     focusEnd_ = std::chrono::steady_clock::now() + std::chrono::seconds(remainingSeconds_);
     EnterFullscreenTopmost();
     RebuildLayout();
@@ -750,13 +828,7 @@ void FocusClockApp::FinishFocus() {
     whitelistYieldUntil_ = std::chrono::steady_clock::time_point{};
     remainingSeconds_ = selectedMinutes_ * 60LL;
 
-    for (auto const& [hwnd, style] : promotedWindows_) {
-        if (IsWindow(hwnd)) {
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style);
-            SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        }
-    }
-    promotedWindows_.clear();
+    RestorePromotedWhitelistWindows();
 
     MessageBeep(MB_OK);
     EnterFullscreenNotTopmost();
@@ -866,8 +938,43 @@ void FocusClockApp::RebuildLayout() {
             buttons_.push_back(tab);
         }
 
-        if (activePanelTab_ == kPanelTabSettingsId) {
-            int contentLeft = panelBounds_.left + 216;
+        int contentLeft = panelBounds_.left + 216;
+        if (activePanelTab_ == kPanelTabScheduleId) {
+            scheduleScrollOffset_ = std::clamp(scheduleScrollOffset_, 0, ScheduleContentMaxScroll());
+            int scrollY = scheduleScrollOffset_;
+            AddTimeStepperButtons(kScheduleStartHourMinusId, kScheduleStartHourDisplayId, kScheduleStartHourPlusId, contentLeft, panelBounds_.top + 214 - scrollY, scheduleDraftStartHour_, 23, L" 时");
+            AddTimeStepperButtons(kScheduleStartMinuteMinusId, kScheduleStartMinuteDisplayId, kScheduleStartMinutePlusId, contentLeft + 236, panelBounds_.top + 214 - scrollY, scheduleDraftStartMinute_, 59, L" 分");
+            AddTimeStepperButtons(kScheduleEndHourMinusId, kScheduleEndHourDisplayId, kScheduleEndHourPlusId, contentLeft, panelBounds_.top + 316 - scrollY, scheduleDraftEndHour_, 23, L" 时");
+            AddTimeStepperButtons(kScheduleEndMinuteMinusId, kScheduleEndMinuteDisplayId, kScheduleEndMinutePlusId, contentLeft + 236, panelBounds_.top + 316 - scrollY, scheduleDraftEndMinute_, 59, L" 分");
+
+            AddPanelButton(
+                kScheduleAddTaskId,
+                RECT{ contentLeft, panelBounds_.top + 378 - scrollY, contentLeft + 154, panelBounds_.top + 422 - scrollY },
+                L"添加计划",
+                false,
+                true,
+                true,
+                false);
+
+            int listTop = panelBounds_.top + 506 - scrollY;
+            int rowHeight = 34;
+            RECT viewport = PanelContentViewport();
+            for (int i = 0; i < static_cast<int>(scheduledTasks_.size()); ++i) {
+                int rowTop = listTop + i * rowHeight;
+                int rowBottom = rowTop + 26;
+                if (rowBottom < viewport.top || rowTop > viewport.bottom) {
+                    continue;
+                }
+                AddPanelButton(
+                    kScheduleDeleteButtonBaseId + i,
+                    RECT{ panelBounds_.right - 104, rowTop, panelBounds_.right - 40, rowBottom },
+                    L"删除",
+                    false,
+                    true,
+                    false,
+                    true);
+            }
+        } else if (activePanelTab_ == kPanelTabSettingsId) {
             AddStepperButtons(
                 kSettingMaxMinusFiveId,
                 kSettingMaxMinusOneId,
@@ -1038,8 +1145,15 @@ void FocusClockApp::Paint() {
 
     if (panelOpen_ && !focusActive_) {
         DrawPanel(g, rc);
+        RECT viewport = PanelContentViewport();
         for (const auto& button : buttons_) {
             if (button.id >= kPanelButtonBaseId) {
+                if (activePanelTab_ == kPanelTabScheduleId &&
+                    button.id >= kScheduleStartHourMinusId &&
+                    button.id < kScheduleDeleteButtonLimit &&
+                    (button.rect.bottom < viewport.top || button.rect.top > viewport.bottom)) {
+                    continue;
+                }
                 DrawButton(g, button);
             }
         }
@@ -1184,6 +1298,11 @@ void FocusClockApp::DrawPanel(Graphics& g, const RECT& rc) {
     RectF contentRect(panel.X + 216.0f, panel.Y + 92.0f, panel.Width - 248.0f, panel.Height - 126.0f);
     if (activePanelTab_ == kPanelTabOverviewId) {
         DrawOverviewTab(g, contentRect, theme, family);
+    } else if (activePanelTab_ == kPanelTabScheduleId) {
+        GraphicsState state = g.Save();
+        g.SetClip(contentRect);
+        DrawScheduleTab(g, contentRect, theme, family);
+        g.Restore(state);
     } else if (activePanelTab_ == kPanelTabSettingsId) {
         DrawSettingsTab(g, contentRect, theme, family);
     }
@@ -1213,6 +1332,66 @@ void FocusClockApp::DrawSettingsTab(Graphics& g, const RectF& contentRect, const
 
     DrawTextBlock(g, L"默认专注时长", RectF(contentRect.X, contentRect.Y + 202.0f, contentRect.Width, 28.0f), labelFont, theme.primaryText, StringAlignmentNear, StringAlignmentCenter);
     DrawTextBlock(g, L"启动时和恢复默认时使用的时长，会自动受最大时长限制。", RectF(contentRect.X, contentRect.Y + 232.0f, contentRect.Width, 26.0f), helpFont, theme.mutedText, StringAlignmentNear, StringAlignmentCenter);
+}
+
+void FocusClockApp::DrawScheduleTab(Graphics& g, const RectF& contentRect, const Theme& theme, FontFamily& family) {
+    Font headingFont(&family, 24, FontStyleRegular, UnitPixel);
+    Font labelFont(&family, 18, FontStyleRegular, UnitPixel);
+    Font helpFont(&family, 15, FontStyleRegular, UnitPixel);
+    Font rowFont(&family, 16, FontStyleRegular, UnitPixel);
+    REAL y = -static_cast<REAL>(scheduleScrollOffset_);
+
+    DrawTextBlock(g, L"计划专注", RectF(contentRect.X, contentRect.Y + y, contentRect.Width, 34.0f), headingFont, theme.primaryText, StringAlignmentNear, StringAlignmentCenter);
+    DrawTextBlock(g, L"添加每天执行的计划，时间段不能重叠。到达计划时间后会自动开始专注。", RectF(contentRect.X, contentRect.Y + 38.0f + y, contentRect.Width, 42.0f), helpFont, theme.mutedText, StringAlignmentNear, StringAlignmentNear);
+
+    DrawTextBlock(g, L"开始时间", RectF(contentRect.X, contentRect.Y + 96.0f + y, contentRect.Width, 28.0f), labelFont, theme.primaryText, StringAlignmentNear, StringAlignmentCenter);
+    DrawTextBlock(g, L"结束时间", RectF(contentRect.X, contentRect.Y + 198.0f + y, contentRect.Width, 28.0f), labelFont, theme.primaryText, StringAlignmentNear, StringAlignmentCenter);
+
+    Color messageColor = scheduleMessageIsError_ ? theme.danger : theme.secondaryText;
+    std::wstring message = scheduleMessage_;
+    if (message.empty()) {
+        int duration = ScheduleDraftEndMinute() - ScheduleDraftStartMinute();
+        if (duration > 0) {
+            message = L"当前计划时长 " + std::to_wstring(duration) + L" 分钟。";
+        } else {
+            message = L"结束时间必须晚于开始时间。";
+            messageColor = theme.danger;
+        }
+    }
+    DrawTextBlock(g, message, RectF(contentRect.X + 170.0f, contentRect.Y + 292.0f + y, contentRect.Width - 170.0f, 44.0f), helpFont, messageColor, StringAlignmentNear, StringAlignmentCenter);
+
+    DrawTextBlock(g, L"已添加计划", RectF(contentRect.X, contentRect.Y + 374.0f + y, contentRect.Width, 28.0f), labelFont, theme.primaryText, StringAlignmentNear, StringAlignmentCenter);
+    if (scheduledTasks_.empty()) {
+        DrawTextBlock(g, L"暂无计划。", RectF(contentRect.X, contentRect.Y + 408.0f + y, contentRect.Width, 28.0f), helpFont, theme.mutedText, StringAlignmentNear, StringAlignmentCenter);
+        return;
+    }
+
+    int listTop = static_cast<int>(contentRect.Y + 414.0f + y);
+    int rowHeight = 34;
+    for (int i = 0; i < static_cast<int>(scheduledTasks_.size()); ++i) {
+        int rowTop = listTop + i * rowHeight;
+        if (rowTop + 26 < contentRect.Y || rowTop > contentRect.Y + contentRect.Height) {
+            continue;
+        }
+        const auto& task = scheduledTasks_[i];
+        std::wstring line = FormatMinuteOfDay(task.startMinute) + L" - " + FormatMinuteOfDay(task.endMinute) +
+            L"  (" + std::to_wstring(task.endMinute - task.startMinute) + L" 分钟)";
+        DrawTextBlock(g, line, RectF(contentRect.X, static_cast<REAL>(rowTop), contentRect.Width - 90.0f, 26.0f), rowFont, theme.secondaryText, StringAlignmentNear, StringAlignmentCenter);
+    }
+
+    int maxScroll = ScheduleContentMaxScroll();
+    if (maxScroll > 0) {
+        REAL trackX = contentRect.X + contentRect.Width - 8.0f;
+        REAL trackY = contentRect.Y;
+        REAL trackHeight = contentRect.Height;
+        SolidBrush trackBrush(darkMode_ ? Color(90, 68, 78, 94) : Color(90, 184, 194, 207));
+        SolidBrush thumbBrush(theme.accent);
+        g.FillRectangle(&trackBrush, trackX, trackY, 4.0f, trackHeight);
+
+        REAL thumbHeight = std::max(40.0f, trackHeight * (trackHeight / (trackHeight + maxScroll)));
+        REAL thumbY = trackY + (trackHeight - thumbHeight) * (static_cast<REAL>(scheduleScrollOffset_) / maxScroll);
+        g.FillRectangle(&thumbBrush, trackX, thumbY, 4.0f, thumbHeight);
+    }
 }
 
 void FocusClockApp::DrawButton(Graphics& g, const UiButton& button) {
@@ -1280,6 +1459,9 @@ void FocusClockApp::DrawButton(Graphics& g, const UiButton& button) {
     FontFamily family(L"Segoe UI");
     int buttonHeight = static_cast<int>(button.rect.bottom - button.rect.top);
     REAL fontSize = static_cast<REAL>(std::max(18, std::min(24, buttonHeight / 3)));
+    if (button.id >= kScheduleDeleteButtonBaseId && button.id < kScheduleDeleteButtonLimit) {
+        fontSize = 14.0f;
+    }
     Font font(&family, fontSize, FontStyleRegular, UnitPixel);
     DrawTextBlock(g, button.label, r, font, text, StringAlignmentCenter, StringAlignmentCenter);
 }
@@ -1304,8 +1486,15 @@ void FocusClockApp::DrawButtonIcon(Graphics& g, const UiButton& button, const Re
 
 void FocusClockApp::HitTestAndClick(POINT pt) {
     if (panelOpen_) {
+        RECT viewport = PanelContentViewport();
         for (const auto& button : buttons_) {
             if (button.id < kPanelButtonBaseId || !button.enabled || !PtInRect(&button.rect, pt)) {
+                continue;
+            }
+            if (activePanelTab_ == kPanelTabScheduleId &&
+                button.id >= kScheduleStartHourMinusId &&
+                button.id < kScheduleDeleteButtonLimit &&
+                !PtInRect(&viewport, pt)) {
                 continue;
             }
 
@@ -1366,6 +1555,7 @@ bool FocusClockApp::BeginWhitelistDrag(POINT pt) {
     whitelistDragMoved_ = false;
     whitelistDragStartPt_ = pt;
     whitelistDragStartOrigin_ = POINT{ whitelistLeft_, whitelistTop_ };
+    previousWhitelistBounds_ = whitelistBounds_;
     SetCapture(hwnd_);
     return true;
 }
@@ -1386,8 +1576,7 @@ void FocusClockApp::UpdateWhitelistDrag(POINT pt) {
     RECT rc{};
     GetClientRect(hwnd_, &rc);
     ClampWhitelistLayout(rc.right - rc.left, rc.bottom - rc.top);
-    RebuildLayout();
-    InvalidateRect(hwnd_, nullptr, FALSE);
+    MarkWhitelistLayoutChanged(false);
 }
 
 void FocusClockApp::EndWhitelistDrag() {
@@ -1397,7 +1586,7 @@ void FocusClockApp::EndWhitelistDrag() {
 
     whitelistDragging_ = false;
     ReleaseCapture();
-    SaveWhitelistLayoutSettings();
+    ProcessPendingWhitelistLayout(true);
 }
 
 bool FocusClockApp::IsShiftDown() const {
@@ -1416,9 +1605,8 @@ void FocusClockApp::MoveWhitelistLayout(int dx, int dy) {
     RECT rc{};
     GetClientRect(hwnd_, &rc);
     ClampWhitelistLayout(rc.right - rc.left, rc.bottom - rc.top);
-    RebuildLayout();
-    InvalidateRect(hwnd_, nullptr, FALSE);
-    SaveWhitelistLayoutSettings();
+    MarkWhitelistLayoutChanged(false);
+    ProcessPendingWhitelistLayout();
 }
 
 void FocusClockApp::ResizeWhitelistLayout(int delta) {
@@ -1426,9 +1614,111 @@ void FocusClockApp::ResizeWhitelistLayout(int delta) {
     RECT rc{};
     GetClientRect(hwnd_, &rc);
     ClampWhitelistLayout(rc.right - rc.left, rc.bottom - rc.top);
-    RebuildLayout();
-    InvalidateRect(hwnd_, nullptr, FALSE);
-    SaveWhitelistLayoutSettings();
+    MarkWhitelistLayoutChanged(true);
+    ProcessPendingWhitelistLayout();
+}
+
+void FocusClockApp::RebuildWhitelistLayoutOnly() {
+    RECT rc{};
+    GetClientRect(hwnd_, &rc);
+    int width = rc.right - rc.left;
+    int height = rc.bottom - rc.top;
+
+    ClampWhitelistLayout(width, height);
+
+    buttons_.erase(
+        std::remove_if(buttons_.begin(), buttons_.end(), [](const UiButton& button) {
+            return button.id >= kWhitelistButtonBaseId && button.id < kWhitelistButtonLimit;
+        }),
+        buttons_.end());
+
+    const int appButtonSize = whitelistIconSize_;
+    const int appColumns = 3;
+    const int appGap = 14;
+    const int appGridWidth = appColumns * appButtonSize + (appColumns - 1) * appGap;
+    const int appLeft = whitelistLeft_;
+    const int appTop = whitelistTop_;
+    const int appBottomLimit = height - 112;
+    const int appRows = std::max(0, (appBottomLimit - appTop - 40) / (appButtonSize + appGap));
+    const int appCapacity = std::max(0, std::min(12, appRows * appColumns));
+    const int appCount = std::min(static_cast<int>(whitelistEntries_.size()), appCapacity);
+    whitelistBounds_ = RECT{ appLeft, appTop, appLeft + appGridWidth, appTop + 40 };
+
+    for (int i = 0; i < appCount; ++i) {
+        int row = i / appColumns;
+        int column = i % appColumns;
+        int left = appLeft + column * (appButtonSize + appGap);
+        int top = appTop + 40 + row * (appButtonSize + appGap);
+        UiButton app{};
+        app.rect = RECT{ left, top, left + appButtonSize, top + appButtonSize };
+        app.label = whitelistEntries_[i].label;
+        app.iconPath = whitelistEntries_[i].iconPath;
+        app.id = kWhitelistButtonBaseId + i;
+        app.primary = focusActive_;
+        app.iconOnly = true;
+        buttons_.push_back(app);
+
+        if (i == 0) {
+            whitelistBounds_.top = std::min(whitelistBounds_.top, static_cast<LONG>(top));
+        }
+        whitelistBounds_.left = std::min(whitelistBounds_.left, static_cast<LONG>(left));
+        whitelistBounds_.right = std::max(whitelistBounds_.right, static_cast<LONG>(left + appButtonSize));
+        whitelistBounds_.bottom = std::max(whitelistBounds_.bottom, static_cast<LONG>(top + appButtonSize));
+    }
+}
+
+void FocusClockApp::MarkWhitelistLayoutChanged(bool needsRebuild) {
+    if (!whitelistLayoutDirty_) {
+        previousWhitelistBounds_ = whitelistBounds_;
+    }
+
+    whitelistLayoutDirty_ = true;
+    whitelistLayoutNeedsRebuild_ = whitelistLayoutNeedsRebuild_ || needsRebuild;
+    whitelistLayoutSavePending_ = true;
+    whitelistLayoutLastChangeTick_ = GetTickCount();
+    SetTimer(hwnd_, kWhitelistLayoutTimer, kWhitelistLayoutTimerMs, nullptr);
+}
+
+void FocusClockApp::ProcessPendingWhitelistLayout(bool forceSave) {
+    if (whitelistLayoutDirty_) {
+        RECT oldBounds = previousWhitelistBounds_;
+        if (whitelistLayoutNeedsRebuild_) {
+            RebuildWhitelistLayoutOnly();
+        } else {
+            RECT rc{};
+            GetClientRect(hwnd_, &rc);
+            ClampWhitelistLayout(rc.right - rc.left, rc.bottom - rc.top);
+            RebuildWhitelistLayoutOnly();
+        }
+
+        InvalidateWhitelistArea(oldBounds);
+        whitelistLayoutDirty_ = false;
+        whitelistLayoutNeedsRebuild_ = false;
+    }
+
+    bool shouldSave = forceSave;
+    if (!shouldSave && whitelistLayoutSavePending_) {
+        DWORD elapsed = GetTickCount() - whitelistLayoutLastChangeTick_;
+        shouldSave = elapsed >= kWhitelistLayoutSaveDelayMs;
+    }
+
+    if (shouldSave && whitelistLayoutSavePending_) {
+        SaveWhitelistLayoutSettings();
+        whitelistLayoutSavePending_ = false;
+    }
+
+    if (!whitelistLayoutDirty_ && !whitelistLayoutSavePending_) {
+        KillTimer(hwnd_, kWhitelistLayoutTimer);
+    }
+}
+
+void FocusClockApp::InvalidateWhitelistArea(const RECT& previousBounds) {
+    RECT oldRect = previousBounds;
+    RECT newRect = whitelistBounds_;
+    InflateRect(&oldRect, kMaxWhitelistIconSize + 64, 64);
+    InflateRect(&newRect, kMaxWhitelistIconSize + 64, 64);
+    InvalidateRect(hwnd_, &oldRect, FALSE);
+    InvalidateRect(hwnd_, &newRect, FALSE);
 }
 
 void FocusClockApp::ClampWhitelistLayout(int clientWidth, int clientHeight) {
@@ -1548,6 +1838,23 @@ void FocusClockApp::AddStepperButtons(int minusFiveId, int minusOneId, int displ
     AddPanelButton(plusFiveId, RECT{ left, top, left + smallWidth, top + buttonHeight }, L"+5", false, canIncrease);
 }
 
+void FocusClockApp::AddTimeStepperButtons(int minusId, int displayId, int plusId, int left, int top, int value, int maxValue, const std::wstring& suffix) {
+    const int buttonHeight = 44;
+    const int smallWidth = 42;
+    const int displayWidth = 112;
+    const int gap = 8;
+
+    AddPanelButton(minusId, RECT{ left, top, left + smallWidth, top + buttonHeight }, L"-", false, true);
+    left += smallWidth + gap;
+
+    wchar_t buffer[32]{};
+    swprintf_s(buffer, L"%02d%s", std::clamp(value, 0, maxValue), suffix.c_str());
+    AddPanelButton(displayId, RECT{ left, top, left + displayWidth, top + buttonHeight }, buffer, true, false);
+    left += displayWidth + gap;
+
+    AddPanelButton(plusId, RECT{ left, top, left + smallWidth, top + buttonHeight }, L"+", false, true);
+}
+
 void FocusClockApp::HandlePanelCommand(int id) {
     if (id == kPanelCloseButtonId) {
         ClosePanel();
@@ -1573,6 +1880,12 @@ void FocusClockApp::HandlePanelCommand(int id) {
         SetDefaultFocusMinutes(defaultFocusMinutes_ + 1);
     } else if (id == kSettingDefaultPlusFiveId) {
         SetDefaultFocusMinutes(defaultFocusMinutes_ + 5);
+    } else if (id >= kScheduleStartHourMinusId && id <= kScheduleEndMinutePlusId) {
+        AdjustScheduleDraft(id);
+    } else if (id == kScheduleAddTaskId) {
+        AddScheduledFocusTask();
+    } else if (id >= kScheduleDeleteButtonBaseId && id < kScheduleDeleteButtonLimit) {
+        DeleteScheduledFocusTask(static_cast<size_t>(id - kScheduleDeleteButtonBaseId));
     }
 }
 
@@ -1593,6 +1906,241 @@ void FocusClockApp::SetDefaultFocusMinutes(int minutes) {
     SaveAppSettings();
     RebuildLayout();
     InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void FocusClockApp::AdjustScheduleDraft(int id) {
+    auto wrap = [](int value, int maxValue) {
+        if (value < 0) {
+            return maxValue;
+        }
+        if (value > maxValue) {
+            return 0;
+        }
+        return value;
+    };
+
+    if (id == kScheduleStartHourMinusId) {
+        scheduleDraftStartHour_ = wrap(scheduleDraftStartHour_ - 1, 23);
+    } else if (id == kScheduleStartHourPlusId) {
+        scheduleDraftStartHour_ = wrap(scheduleDraftStartHour_ + 1, 23);
+    } else if (id == kScheduleStartMinuteMinusId) {
+        scheduleDraftStartMinute_ = wrap(scheduleDraftStartMinute_ - 5, 55);
+    } else if (id == kScheduleStartMinutePlusId) {
+        scheduleDraftStartMinute_ = wrap(scheduleDraftStartMinute_ + 5, 55);
+    } else if (id == kScheduleEndHourMinusId) {
+        scheduleDraftEndHour_ = wrap(scheduleDraftEndHour_ - 1, 23);
+    } else if (id == kScheduleEndHourPlusId) {
+        scheduleDraftEndHour_ = wrap(scheduleDraftEndHour_ + 1, 23);
+    } else if (id == kScheduleEndMinuteMinusId) {
+        scheduleDraftEndMinute_ = wrap(scheduleDraftEndMinute_ - 5, 55);
+    } else if (id == kScheduleEndMinutePlusId) {
+        scheduleDraftEndMinute_ = wrap(scheduleDraftEndMinute_ + 5, 55);
+    }
+
+    scheduleMessage_.clear();
+    scheduleMessageIsError_ = false;
+    RebuildLayout();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void FocusClockApp::AddScheduledFocusTask() {
+    int startMinute = ScheduleDraftStartMinute();
+    int endMinute = ScheduleDraftEndMinute();
+    if (!IsValidScheduleRange(startMinute, endMinute)) {
+        int duration = endMinute - startMinute;
+        if (duration > maxFocusMinutes_) {
+            scheduleMessage_ = L"添加失败：计划时长不能超过最大专注时长。";
+        } else {
+            scheduleMessage_ = L"添加失败：结束时间必须晚于开始时间。";
+        }
+        scheduleMessageIsError_ = true;
+    } else if (HasScheduleConflict(startMinute, endMinute)) {
+        scheduleMessage_ = L"添加失败：该时间段与已有计划冲突。";
+        scheduleMessageIsError_ = true;
+    } else {
+        scheduledTasks_.push_back(ScheduledFocusTask{ startMinute, endMinute, 0 });
+        std::sort(scheduledTasks_.begin(), scheduledTasks_.end(), [](const ScheduledFocusTask& left, const ScheduledFocusTask& right) {
+            return left.startMinute < right.startMinute;
+        });
+        SaveScheduledFocusTasks();
+        scheduleMessage_ = L"已添加计划 " + FormatMinuteOfDay(startMinute) + L" - " + FormatMinuteOfDay(endMinute) + L"。";
+        scheduleMessageIsError_ = false;
+    }
+
+    RebuildLayout();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void FocusClockApp::DeleteScheduledFocusTask(size_t index) {
+    if (index >= scheduledTasks_.size()) {
+        return;
+    }
+
+    scheduledTasks_.erase(scheduledTasks_.begin() + static_cast<std::ptrdiff_t>(index));
+    SaveScheduledFocusTasks();
+    scheduleMessage_ = L"已删除计划。";
+    scheduleMessageIsError_ = false;
+    RebuildLayout();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void FocusClockApp::ScrollScheduleTab(int delta) {
+    int maxScroll = ScheduleContentMaxScroll();
+    int next = std::clamp(scheduleScrollOffset_ + delta, 0, maxScroll);
+    if (next == scheduleScrollOffset_) {
+        return;
+    }
+
+    scheduleScrollOffset_ = next;
+    RebuildLayout();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+int FocusClockApp::ScheduleContentMaxScroll() const {
+    if (panelBounds_.bottom <= panelBounds_.top) {
+        return 0;
+    }
+
+    int viewportHeight = std::max(1, static_cast<int>(panelBounds_.bottom - panelBounds_.top - 126));
+    int contentHeight = 450 + static_cast<int>(scheduledTasks_.size()) * 34;
+    return std::max(0, contentHeight - viewportHeight);
+}
+
+RECT FocusClockApp::PanelContentViewport() const {
+    if (panelBounds_.bottom <= panelBounds_.top) {
+        return RECT{};
+    }
+
+    return RECT{
+        panelBounds_.left + 216,
+        panelBounds_.top + 92,
+        panelBounds_.right - 32,
+        panelBounds_.bottom - 34
+    };
+}
+
+void FocusClockApp::LoadScheduledFocusTasks() {
+    std::wstring path = GetSettingsPath();
+    int count = GetPrivateProfileIntW(L"Schedule", L"Count", 0, path.c_str());
+    count = std::clamp(count, 0, 64);
+
+    scheduledTasks_.clear();
+    for (int i = 0; i < count; ++i) {
+        std::wstring key = L"Task" + std::to_wstring(i);
+        wchar_t buffer[64]{};
+        GetPrivateProfileStringW(L"Schedule", key.c_str(), L"", buffer, static_cast<DWORD>(std::size(buffer)), path.c_str());
+
+        std::wstring value = buffer;
+        size_t comma = value.find(L',');
+        if (comma == std::wstring::npos) {
+            continue;
+        }
+
+        size_t secondComma = value.find(L',', comma + 1);
+        int startMinute = _wtoi(value.substr(0, comma).c_str());
+        int endMinute = _wtoi(value.substr(comma + 1, secondComma == std::wstring::npos ? std::wstring::npos : secondComma - comma - 1).c_str());
+        int lastStartedDate = secondComma == std::wstring::npos ? 0 : _wtoi(value.substr(secondComma + 1).c_str());
+        if (!IsValidScheduleRange(startMinute, endMinute) || HasScheduleConflict(startMinute, endMinute)) {
+            continue;
+        }
+        scheduledTasks_.push_back(ScheduledFocusTask{ startMinute, endMinute, lastStartedDate });
+    }
+
+    std::sort(scheduledTasks_.begin(), scheduledTasks_.end(), [](const ScheduledFocusTask& left, const ScheduledFocusTask& right) {
+        return left.startMinute < right.startMinute;
+    });
+}
+
+void FocusClockApp::SaveScheduledFocusTasks() const {
+    std::wstring path = GetSettingsPath();
+    wchar_t buffer[64]{};
+
+    int oldCount = GetPrivateProfileIntW(L"Schedule", L"Count", 0, path.c_str());
+    oldCount = std::clamp(oldCount, 0, 128);
+    for (int i = 0; i < oldCount; ++i) {
+        std::wstring key = L"Task" + std::to_wstring(i);
+        WritePrivateProfileStringW(L"Schedule", key.c_str(), nullptr, path.c_str());
+    }
+
+    swprintf_s(buffer, L"%d", static_cast<int>(scheduledTasks_.size()));
+    WritePrivateProfileStringW(L"Schedule", L"Count", buffer, path.c_str());
+
+    for (size_t i = 0; i < scheduledTasks_.size(); ++i) {
+        std::wstring key = L"Task" + std::to_wstring(i);
+        swprintf_s(buffer, L"%d,%d,%d", scheduledTasks_[i].startMinute, scheduledTasks_[i].endMinute, scheduledTasks_[i].lastStartedDate);
+        WritePrivateProfileStringW(L"Schedule", key.c_str(), buffer, path.c_str());
+    }
+}
+
+void FocusClockApp::CheckScheduledFocusTasks(bool forceResumeActiveRange) {
+    if (focusActive_ || scheduledTasks_.empty()) {
+        return;
+    }
+
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    int today = DateStamp(now);
+    int minuteOfDay = now.wHour * 60 + now.wMinute;
+    int secondOfDay = minuteOfDay * 60 + now.wSecond;
+
+    for (auto& task : scheduledTasks_) {
+        if ((!forceResumeActiveRange && task.lastStartedDate == today) ||
+            minuteOfDay < task.startMinute ||
+            minuteOfDay >= task.endMinute) {
+            continue;
+        }
+
+        int remainingSeconds = std::max(1, task.endMinute * 60 - secondOfDay);
+        int remainingMinutes = std::max(1, (remainingSeconds + 59) / 60);
+        selectedMinutes_ = std::clamp(remainingMinutes, kMinFocusMinutes, maxFocusMinutes_);
+        task.lastStartedDate = today;
+        SaveScheduledFocusTasks();
+        scheduleMessage_ = L"计划 " + FormatMinuteOfDay(task.startMinute) + L" - " + FormatMinuteOfDay(task.endMinute) + L" 已自动开始。";
+        scheduleMessageIsError_ = false;
+        StartFocusForSeconds(remainingSeconds);
+        return;
+    }
+}
+
+bool FocusClockApp::HasScheduleConflict(int startMinute, int endMinute, int ignoreIndex) const {
+    for (size_t i = 0; i < scheduledTasks_.size(); ++i) {
+        if (static_cast<int>(i) == ignoreIndex) {
+            continue;
+        }
+
+        const auto& task = scheduledTasks_[i];
+        if (startMinute < task.endMinute && endMinute > task.startMinute) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool FocusClockApp::IsValidScheduleRange(int startMinute, int endMinute) const {
+    return startMinute >= 0 && startMinute < 24 * 60 &&
+        endMinute > startMinute && endMinute <= 24 * 60 &&
+        endMinute - startMinute <= maxFocusMinutes_;
+}
+
+int FocusClockApp::ScheduleDraftStartMinute() const {
+    return scheduleDraftStartHour_ * 60 + scheduleDraftStartMinute_;
+}
+
+int FocusClockApp::ScheduleDraftEndMinute() const {
+    return scheduleDraftEndHour_ * 60 + scheduleDraftEndMinute_;
+}
+
+std::wstring FocusClockApp::FormatMinuteOfDay(int minute) const {
+    minute = std::clamp(minute, 0, 24 * 60);
+    int hour = minute / 60;
+    int min = minute % 60;
+    wchar_t buffer[16]{};
+    swprintf_s(buffer, L"%02d:%02d", hour, min);
+    return buffer;
+}
+
+int FocusClockApp::DateStamp(const SYSTEMTIME& time) {
+    return static_cast<int>(time.wYear) * 10000 + static_cast<int>(time.wMonth) * 100 + static_cast<int>(time.wDay);
 }
 
 std::wstring FocusClockApp::GetSettingsPath() const {
@@ -1664,6 +2212,33 @@ void FocusClockApp::PromoteWhitelistWindow(HWND target) {
     LONG_PTR exStyle = GetWindowLongPtrW(target, GWL_EXSTYLE);
     SetWindowLongPtrW(target, GWL_EXSTYLE, exStyle | WS_EX_TOPMOST);
     SetWindowPos(target, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+void FocusClockApp::RestorePromotedWhitelistWindows() {
+    EnumWindows(EnumWhitelistedWindowsForRestore, reinterpret_cast<LPARAM>(this));
+
+    for (auto const& [window, style] : promotedWindows_) {
+        RestoreWhitelistWindow(window, style);
+    }
+    promotedWindows_.clear();
+}
+
+void FocusClockApp::RestoreWhitelistWindow(HWND target, LONG_PTR savedStyle) {
+    if (!target || !IsWindow(target)) {
+        return;
+    }
+
+    LONG_PTR currentStyle = GetWindowLongPtrW(target, GWL_EXSTYLE);
+    LONG_PTR nextStyle = savedStyle != 0 ? savedStyle : (currentStyle & ~WS_EX_TOPMOST);
+    SetWindowLongPtrW(target, GWL_EXSTYLE, nextStyle & ~WS_EX_TOPMOST);
+    SetWindowPos(
+        target,
+        HWND_NOTOPMOST,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED);
 }
 
 bool FocusClockApp::IsTrackedWhitelistWindowValid() const {
@@ -1968,6 +2543,27 @@ BOOL CALLBACK FocusClockApp::EnumWhitelistWindows(HWND window, LPARAM param) {
         return FALSE;
     }
 
+    return TRUE;
+}
+
+BOOL CALLBACK FocusClockApp::EnumWhitelistedWindowsForRestore(HWND window, LPARAM param) {
+    auto* app = reinterpret_cast<FocusClockApp*>(param);
+    if (!app || !window || window == app->hwnd_) {
+        return TRUE;
+    }
+
+    if (!IsWindowVisible(window) || GetWindow(window, GW_OWNER)) {
+        return TRUE;
+    }
+
+    std::wstring path = app->GetProcessImagePath(window);
+    if (path.empty() || !app->IsExecutableWhitelisted(path)) {
+        return TRUE;
+    }
+
+    auto saved = app->promotedWindows_.find(window);
+    LONG_PTR savedStyle = saved == app->promotedWindows_.end() ? 0 : saved->second;
+    app->RestoreWhitelistWindow(window, savedStyle);
     return TRUE;
 }
 
