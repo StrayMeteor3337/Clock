@@ -209,10 +209,15 @@ private:
     void CheckRerunStartupTaskStatus();
     bool HasScheduleConflict(int startMinute, int endMinute, int ignoreIndex = -1) const;
     bool IsValidScheduleRange(int startMinute, int endMinute) const;
+    int ScheduleDurationMinutes(int startMinute, int endMinute) const;
+    bool IsMinuteInScheduleRange(int minuteOfDay, int startMinute, int endMinute) const;
+    int ScheduleRemainingSeconds(const ScheduledFocusTask& task, int secondOfDay) const;
+    int ScheduleStartDateStamp(const ScheduledFocusTask& task, const SYSTEMTIME& now) const;
     int ScheduleDraftStartMinute() const;
     int ScheduleDraftEndMinute() const;
     std::wstring FormatMinuteOfDay(int minute) const;
     static int DateStamp(const SYSTEMTIME& time);
+    static int PreviousDateStamp(const SYSTEMTIME& time);
     std::wstring GetSettingsPath() const;
     void OpenWhitelistEntry(size_t index);
     HWND FindRunningWhitelistWindow(const WhitelistEntry& entry) const;
@@ -1389,8 +1394,8 @@ void FocusClockApp::DrawScheduleTab(Graphics& g, const RectF& contentRect, const
     Color messageColor = scheduleMessageIsError_ ? theme.danger : theme.secondaryText;
     std::wstring message = scheduleMessage_;
     if (message.empty()) {
-        int duration = ScheduleDraftEndMinute() - ScheduleDraftStartMinute();
-        if (duration > 0) {
+        int duration = ScheduleDurationMinutes(ScheduleDraftStartMinute(), ScheduleDraftEndMinute());
+        if (duration > 0 && duration <= maxFocusMinutes_) {
             message = L"当前计划时长 " + std::to_wstring(duration) + L" 分钟。";
         } else {
             message = L"结束时间必须晚于开始时间。";
@@ -2076,7 +2081,7 @@ void FocusClockApp::AddScheduledFocusTask() {
     int startMinute = ScheduleDraftStartMinute();
     int endMinute = ScheduleDraftEndMinute();
     if (!IsValidScheduleRange(startMinute, endMinute)) {
-        int duration = endMinute - startMinute;
+        int duration = ScheduleDurationMinutes(startMinute, endMinute);
         if (duration > maxFocusMinutes_) {
             scheduleMessage_ = L"添加失败：计划时长不能超过最大专注时长。";
         } else {
@@ -2213,16 +2218,16 @@ void FocusClockApp::CheckScheduledFocusTasks(bool forceResumeActiveRange) {
     int secondOfDay = minuteOfDay * 60 + now.wSecond;
 
     for (auto& task : scheduledTasks_) {
-        if ((!forceResumeActiveRange && task.lastStartedDate == today) ||
-            minuteOfDay < task.startMinute ||
-            minuteOfDay >= task.endMinute) {
+        int scheduleStartDate = ScheduleStartDateStamp(task, now);
+        if ((!forceResumeActiveRange && task.lastStartedDate == scheduleStartDate) ||
+            !IsMinuteInScheduleRange(minuteOfDay, task.startMinute, task.endMinute)) {
             continue;
         }
 
-        int remainingSeconds = std::max(1, task.endMinute * 60 - secondOfDay);
+        int remainingSeconds = ScheduleRemainingSeconds(task, secondOfDay);
         int remainingMinutes = std::max(1, (remainingSeconds + 59) / 60);
         selectedMinutes_ = std::clamp(remainingMinutes, kMinFocusMinutes, maxFocusMinutes_);
-        task.lastStartedDate = today;
+        task.lastStartedDate = scheduleStartDate;
         SaveScheduledFocusTasks();
         scheduleMessage_ = L"计划 " + FormatMinuteOfDay(task.startMinute) + L" - " + FormatMinuteOfDay(task.endMinute) + L" 已自动开始。";
         scheduleMessageIsError_ = false;
@@ -2344,23 +2349,80 @@ void FocusClockApp::CheckRerunStartupTaskStatus() {
 }
 
 bool FocusClockApp::HasScheduleConflict(int startMinute, int endMinute, int ignoreIndex) const {
+    auto appendSegments = [](int start, int end, std::vector<std::pair<int, int>>& segments) {
+        if (end > start) {
+            segments.push_back({ start, end });
+        } else {
+            segments.push_back({ start, 24 * 60 });
+            segments.push_back({ 0, end });
+        }
+    };
+
+    std::vector<std::pair<int, int>> candidate;
+    appendSegments(startMinute, endMinute, candidate);
+
     for (size_t i = 0; i < scheduledTasks_.size(); ++i) {
         if (static_cast<int>(i) == ignoreIndex) {
             continue;
         }
 
         const auto& task = scheduledTasks_[i];
-        if (startMinute < task.endMinute && endMinute > task.startMinute) {
-            return true;
+        std::vector<std::pair<int, int>> existing;
+        appendSegments(task.startMinute, task.endMinute, existing);
+        for (const auto& left : candidate) {
+            for (const auto& right : existing) {
+                if (left.first < right.second && left.second > right.first) {
+                    return true;
+                }
+            }
         }
     }
     return false;
 }
 
 bool FocusClockApp::IsValidScheduleRange(int startMinute, int endMinute) const {
+    int duration = ScheduleDurationMinutes(startMinute, endMinute);
     return startMinute >= 0 && startMinute < 24 * 60 &&
-        endMinute > startMinute && endMinute <= 24 * 60 &&
-        endMinute - startMinute <= maxFocusMinutes_;
+        endMinute >= 0 && endMinute < 24 * 60 &&
+        duration > 0 && duration <= maxFocusMinutes_;
+}
+
+int FocusClockApp::ScheduleDurationMinutes(int startMinute, int endMinute) const {
+    if (startMinute < 0 || startMinute >= 24 * 60 || endMinute < 0 || endMinute >= 24 * 60 || startMinute == endMinute) {
+        return 0;
+    }
+
+    int duration = endMinute - startMinute;
+    if (duration < 0) {
+        duration += 24 * 60;
+    }
+    return duration;
+}
+
+bool FocusClockApp::IsMinuteInScheduleRange(int minuteOfDay, int startMinute, int endMinute) const {
+    if (endMinute > startMinute) {
+        return minuteOfDay >= startMinute && minuteOfDay < endMinute;
+    }
+    if (endMinute < startMinute) {
+        return minuteOfDay >= startMinute || minuteOfDay < endMinute;
+    }
+    return false;
+}
+
+int FocusClockApp::ScheduleRemainingSeconds(const ScheduledFocusTask& task, int secondOfDay) const {
+    int endSecond = task.endMinute * 60;
+    if (task.endMinute <= task.startMinute && secondOfDay >= task.startMinute * 60) {
+        endSecond += 24 * 60 * 60;
+    }
+    return std::max(1, endSecond - secondOfDay);
+}
+
+int FocusClockApp::ScheduleStartDateStamp(const ScheduledFocusTask& task, const SYSTEMTIME& now) const {
+    int minuteOfDay = now.wHour * 60 + now.wMinute;
+    if (task.endMinute <= task.startMinute && minuteOfDay < task.endMinute) {
+        return PreviousDateStamp(now);
+    }
+    return DateStamp(now);
 }
 
 int FocusClockApp::ScheduleDraftStartMinute() const {
@@ -2382,6 +2444,24 @@ std::wstring FocusClockApp::FormatMinuteOfDay(int minute) const {
 
 int FocusClockApp::DateStamp(const SYSTEMTIME& time) {
     return static_cast<int>(time.wYear) * 10000 + static_cast<int>(time.wMonth) * 100 + static_cast<int>(time.wDay);
+}
+
+int FocusClockApp::PreviousDateStamp(const SYSTEMTIME& time) {
+    FILETIME localFileTime{};
+    SystemTimeToFileTime(&time, &localFileTime);
+
+    ULARGE_INTEGER value{};
+    value.LowPart = localFileTime.dwLowDateTime;
+    value.HighPart = localFileTime.dwHighDateTime;
+    value.QuadPart -= 24ULL * 60ULL * 60ULL * 10000000ULL;
+
+    FILETIME previousFileTime{};
+    previousFileTime.dwLowDateTime = value.LowPart;
+    previousFileTime.dwHighDateTime = value.HighPart;
+
+    SYSTEMTIME previous{};
+    FileTimeToSystemTime(&previousFileTime, &previous);
+    return DateStamp(previous);
 }
 
 std::wstring FocusClockApp::GetSettingsPath() const {
@@ -2912,7 +2992,19 @@ long long RerunRemainingSecondsFromSettings() {
 }
 
 bool IsValidStoredScheduleRange(int startMinute, int endMinute) {
-    return startMinute >= 0 && endMinute <= 24 * 60 && startMinute < endMinute;
+    return startMinute >= 0 && startMinute < 24 * 60 &&
+        endMinute >= 0 && endMinute < 24 * 60 &&
+        startMinute != endMinute;
+}
+
+bool IsMinuteInStoredScheduleRange(int minuteOfDay, int startMinute, int endMinute) {
+    if (endMinute > startMinute) {
+        return minuteOfDay >= startMinute && minuteOfDay < endMinute;
+    }
+    if (endMinute < startMinute) {
+        return minuteOfDay >= startMinute || minuteOfDay < endMinute;
+    }
+    return false;
 }
 
 bool HasActiveScheduledFocusRange() {
@@ -2939,8 +3031,7 @@ bool HasActiveScheduledFocusRange() {
         int startMinute = _wtoi(value.substr(0, comma).c_str());
         int endMinute = _wtoi(value.substr(comma + 1, secondComma == std::wstring::npos ? std::wstring::npos : secondComma - comma - 1).c_str());
         if (IsValidStoredScheduleRange(startMinute, endMinute) &&
-            minuteOfDay >= startMinute &&
-            minuteOfDay < endMinute) {
+            IsMinuteInStoredScheduleRange(minuteOfDay, startMinute, endMinute)) {
             return true;
         }
     }
