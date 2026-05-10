@@ -206,6 +206,7 @@ private:
     void SaveScheduledFocusTasks() const;
     void CheckScheduledFocusTasks(bool forceResumeActiveRange = false);
     void CreateRerunStartupTask();
+    void CheckRerunStartupTaskStatus();
     bool HasScheduleConflict(int startMinute, int endMinute, int ignoreIndex = -1) const;
     bool IsValidScheduleRange(int startMinute, int endMinute) const;
     int ScheduleDraftStartMinute() const;
@@ -1915,6 +1916,9 @@ void FocusClockApp::TogglePanel() {
     }
 
     panelOpen_ = !panelOpen_;
+    if (panelOpen_ && activePanelTab_ == kPanelTabRerunId) {
+        CheckRerunStartupTaskStatus();
+    }
     RebuildLayout();
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -1980,6 +1984,9 @@ void FocusClockApp::HandlePanelCommand(int id) {
         ClosePanel();
     } else if (id >= kPanelTabButtonBaseId && id < kSettingMaxMinusFiveId) {
         activePanelTab_ = id - kPanelTabButtonBaseId;
+        if (activePanelTab_ == kPanelTabRerunId) {
+            CheckRerunStartupTaskStatus();
+        }
         RebuildLayout();
         InvalidateRect(hwnd_, nullptr, FALSE);
     } else if (id == kPanelResetSettingsId) {
@@ -2289,6 +2296,51 @@ void FocusClockApp::CreateRerunStartupTask() {
 
     RebuildLayout();
     InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+void FocusClockApp::CheckRerunStartupTaskStatus() {
+    std::wstring command = L"\"C:\\Windows\\System32\\schtasks.exe\" /Query /TN \"FocusClock Rerun\"";
+
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESHOWWINDOW;
+    startup.wShowWindow = SW_HIDE;
+
+    PROCESS_INFORMATION process{};
+    std::vector<wchar_t> commandBuffer(command.begin(), command.end());
+    commandBuffer.push_back(L'\0');
+
+    BOOL created = CreateProcessW(
+        nullptr,
+        commandBuffer.data(),
+        nullptr,
+        nullptr,
+        FALSE,
+        CREATE_NO_WINDOW,
+        nullptr,
+        nullptr,
+        &startup,
+        &process);
+
+    if (!created) {
+        rerunTaskMessage_ = L"状态：无法检查计划任务";
+        rerunTaskMessageIsError_ = true;
+        return;
+    }
+
+    WaitForSingleObject(process.hProcess, 5000);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(process.hProcess, &exitCode);
+    CloseHandle(process.hThread);
+    CloseHandle(process.hProcess);
+
+    if (exitCode == 0) {
+        rerunTaskMessage_ = L"状态：已添加";
+        rerunTaskMessageIsError_ = false;
+    } else {
+        rerunTaskMessage_ = L"状态：未添加";
+        rerunTaskMessageIsError_ = false;
+    }
 }
 
 bool FocusClockApp::HasScheduleConflict(int startMinute, int endMinute, int ignoreIndex) const {
