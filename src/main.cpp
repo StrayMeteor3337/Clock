@@ -112,9 +112,13 @@ public:
 
 private:
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
+    static LRESULT CALLBACK KeyboardHookProc(int code, WPARAM wparam, LPARAM lparam);
     LRESULT HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
 
     bool Create(HINSTANCE instance, int show);
+    void InstallFocusKeyboardHook();
+    void RemoveFocusKeyboardHook();
+    bool ShouldBlockFocusShortcut(DWORD vkCode) const;
     void EnterFullscreenTopmost();
     void EnterFullscreenNotTopmost();
     void EnterFullscreenBelow(HWND aboveWindow);
@@ -183,6 +187,7 @@ private:
 
     HWND hwnd_ = nullptr;
     HINSTANCE instance_ = nullptr;
+    HHOOK keyboardHook_ = nullptr;
     ULONG_PTR gdiplusToken_ = 0;
     bool darkMode_ = false;
     bool focusActive_ = false;
@@ -212,6 +217,8 @@ private:
     FILETIME whitelistWriteTime_{};
     bool whitelistKnown_ = false;
 };
+
+FocusClockApp* gKeyboardHookApp = nullptr;
 
 int FocusClockApp::Run(HINSTANCE instance, int show) {
     GdiplusStartupInput gdiplusStartupInput;
@@ -305,6 +312,21 @@ LRESULT CALLBACK FocusClockApp::WindowProc(HWND hwnd, UINT msg, WPARAM wparam, L
         return app->HandleMessage(hwnd, msg, wparam, lparam);
     }
     return DefWindowProcW(hwnd, msg, wparam, lparam);
+}
+
+LRESULT CALLBACK FocusClockApp::KeyboardHookProc(int code, WPARAM wparam, LPARAM lparam) {
+    if (code == HC_ACTION && gKeyboardHookApp) {
+        bool keyDown = wparam == WM_KEYDOWN || wparam == WM_SYSKEYDOWN;
+        if (keyDown) {
+            auto* info = reinterpret_cast<KBDLLHOOKSTRUCT*>(lparam);
+            if (info && gKeyboardHookApp->ShouldBlockFocusShortcut(info->vkCode)) {
+                MessageBeep(MB_ICONINFORMATION);
+                return 1;
+            }
+        }
+    }
+
+    return CallNextHookEx(nullptr, code, wparam, lparam);
 }
 
 LRESULT FocusClockApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
@@ -508,6 +530,7 @@ LRESULT FocusClockApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
         return 0;
 
     case WM_DESTROY:
+        RemoveFocusKeyboardHook();
         UnregisterHotKey(hwnd, kPanelHotkeyId);
         KillTimer(hwnd, kClockTimer);
         KillTimer(hwnd, kGuardTimer);
@@ -575,6 +598,51 @@ void FocusClockApp::EnterFullscreenBelow(HWND aboveWindow) {
 void FocusClockApp::ApplyDarkMode() {
     BOOL enabled = darkMode_ ? TRUE : FALSE;
     DwmSetWindowAttribute(hwnd_, kDwmwaUseImmersiveDarkMode, &enabled, sizeof(enabled));
+}
+
+void FocusClockApp::InstallFocusKeyboardHook() {
+    if (keyboardHook_) {
+        return;
+    }
+
+    gKeyboardHookApp = this;
+    keyboardHook_ = SetWindowsHookExW(WH_KEYBOARD_LL, KeyboardHookProc, instance_, 0);
+    if (!keyboardHook_) {
+        gKeyboardHookApp = nullptr;
+    }
+}
+
+void FocusClockApp::RemoveFocusKeyboardHook() {
+    if (!keyboardHook_) {
+        if (gKeyboardHookApp == this) {
+            gKeyboardHookApp = nullptr;
+        }
+        return;
+    }
+
+    UnhookWindowsHookEx(keyboardHook_);
+    keyboardHook_ = nullptr;
+    if (gKeyboardHookApp == this) {
+        gKeyboardHookApp = nullptr;
+    }
+}
+
+bool FocusClockApp::ShouldBlockFocusShortcut(DWORD vkCode) const {
+    if (!focusActive_) {
+        return false;
+    }
+
+    bool winDown = (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 || (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+    bool ctrlDown = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    if (!winDown) {
+        return false;
+    }
+
+    if (vkCode == VK_TAB) {
+        return true;
+    }
+
+    return ctrlDown && (vkCode == 'D' || vkCode == VK_LEFT || vkCode == VK_RIGHT || vkCode == VK_F4);
 }
 
 bool FocusClockApp::LoadWhitelistIfNeeded(bool force) {
@@ -666,6 +734,7 @@ void FocusClockApp::RefreshTheme() {
 void FocusClockApp::StartFocus() {
     ClosePanel();
     focusActive_ = true;
+    InstallFocusKeyboardHook();
     remainingSeconds_ = selectedMinutes_ * 60LL;
     focusEnd_ = std::chrono::steady_clock::now() + std::chrono::seconds(remainingSeconds_);
     EnterFullscreenTopmost();
@@ -675,6 +744,7 @@ void FocusClockApp::StartFocus() {
 
 void FocusClockApp::FinishFocus() {
     focusActive_ = false;
+    RemoveFocusKeyboardHook();
     activeWhitelistWindow_ = nullptr;
     pendingWhitelistIndex_ = -1;
     whitelistYieldUntil_ = std::chrono::steady_clock::time_point{};
