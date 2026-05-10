@@ -46,6 +46,7 @@ constexpr int kPanelTabButtonBaseId = 3100;
 constexpr int kPanelTabOverviewId = 1;
 constexpr int kPanelTabSettingsId = 2;
 constexpr int kPanelTabScheduleId = 3;
+constexpr int kPanelTabRerunId = 4;
 constexpr int kSettingMaxMinusFiveId = 3201;
 constexpr int kSettingMaxMinusOneId = 3202;
 constexpr int kSettingMaxDisplayId = 3203;
@@ -71,6 +72,7 @@ constexpr int kScheduleEndMinutePlusId = 3316;
 constexpr int kScheduleAddTaskId = 3320;
 constexpr int kScheduleDeleteButtonBaseId = 3400;
 constexpr int kScheduleDeleteButtonLimit = 3600;
+constexpr int kRerunCreateTaskId = 3601;
 constexpr int kPanelHotkeyId = 4001;
 constexpr int kMinWhitelistIconSize = 48;
 constexpr int kMaxWhitelistIconSize = 120;
@@ -133,7 +135,7 @@ struct FindWindowContext {
 
 class FocusClockApp {
 public:
-    int Run(HINSTANCE instance, int show);
+    int Run(HINSTANCE instance, int show, long long rerunResumeSeconds = 0);
 
 private:
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam);
@@ -151,7 +153,7 @@ private:
     void RefreshTheme();
     bool LoadWhitelistIfNeeded(bool force = false);
     void StartFocus();
-    void StartFocusForSeconds(long long durationSeconds);
+    void StartFocusForSeconds(long long durationSeconds, bool updateSessionSettings = true);
     void FinishFocus();
     void RebuildLayout();
     void Paint();
@@ -179,12 +181,15 @@ private:
     void LoadAppSettings();
     void SaveAppSettings() const;
     void ResetAppSettings();
+    void SaveFocusSessionSettings(long long durationSeconds) const;
+    void ClearFocusSessionSettings() const;
     void TogglePanel();
     void ClosePanel();
     void DrawPanel(Graphics& g, const RECT& rc);
     void DrawOverviewTab(Graphics& g, const RectF& contentRect, const Theme& theme, FontFamily& family);
     void DrawSettingsTab(Graphics& g, const RectF& contentRect, const Theme& theme, FontFamily& family);
     void DrawScheduleTab(Graphics& g, const RectF& contentRect, const Theme& theme, FontFamily& family);
+    void DrawRerunTab(Graphics& g, const RectF& contentRect, const Theme& theme, FontFamily& family);
     void AddPanelButton(int id, const RECT& rect, const std::wstring& label, bool selected = false, bool enabled = true, bool primary = false, bool danger = false);
     void AddStepperButtons(int minusFiveId, int minusOneId, int displayId, int plusOneId, int plusFiveId, int left, int top, int value, const std::wstring& suffix, bool canDecrease, bool canIncrease);
     void AddTimeStepperButtons(int minusId, int displayId, int plusId, int left, int top, int value, int maxValue, const std::wstring& suffix);
@@ -200,6 +205,7 @@ private:
     void LoadScheduledFocusTasks();
     void SaveScheduledFocusTasks() const;
     void CheckScheduledFocusTasks(bool forceResumeActiveRange = false);
+    void CreateRerunStartupTask();
     bool HasScheduleConflict(int startMinute, int endMinute, int ignoreIndex = -1) const;
     bool IsValidScheduleRange(int startMinute, int endMinute) const;
     int ScheduleDraftStartMinute() const;
@@ -231,6 +237,8 @@ private:
     static std::wstring StripExtension(const std::wstring& filename);
     static std::wstring ResolveLaunchPath(const std::wstring& launchSpec);
     static HICON LoadIconForPath(const std::wstring& path);
+    static std::wstring FormatConfigDateTime(const SYSTEMTIME& time);
+    static long long FileTimeToUnixSeconds(const FILETIME& fileTime);
     static std::wstring DecodeTextFile(const std::vector<char>& bytes);
     static BOOL CALLBACK EnumWhitelistWindows(HWND window, LPARAM param);
     static BOOL CALLBACK EnumWhitelistedWindowsForRestore(HWND window, LPARAM param);
@@ -242,6 +250,7 @@ private:
     bool darkMode_ = false;
     bool focusActive_ = false;
     bool panelOpen_ = false;
+    long long rerunResumeSeconds_ = 0;
     HWND activeWhitelistWindow_ = nullptr;
     int maxFocusMinutes_ = kDefaultMaxFocusMinutes;
     int defaultFocusMinutes_ = kDefaultFocusMinutes;
@@ -258,6 +267,8 @@ private:
     int scheduleDraftEndMinute_ = 25;
     std::wstring scheduleMessage_;
     bool scheduleMessageIsError_ = false;
+    std::wstring rerunTaskMessage_;
+    bool rerunTaskMessageIsError_ = false;
     std::chrono::steady_clock::time_point focusEnd_{};
     std::chrono::steady_clock::time_point whitelistYieldUntil_{};
     int pendingWhitelistIndex_ = -1;
@@ -283,7 +294,9 @@ private:
 
 FocusClockApp* gKeyboardHookApp = nullptr;
 
-int FocusClockApp::Run(HINSTANCE instance, int show) {
+int FocusClockApp::Run(HINSTANCE instance, int show, long long rerunResumeSeconds) {
+    rerunResumeSeconds_ = rerunResumeSeconds;
+
     GdiplusStartupInput gdiplusStartupInput;
     if (GdiplusStartup(&gdiplusToken_, &gdiplusStartupInput, nullptr) != Ok) {
         MessageBoxW(nullptr, L"无法初始化 GDI+。", L"FocusClock", MB_ICONERROR);
@@ -307,6 +320,12 @@ int FocusClockApp::Run(HINSTANCE instance, int show) {
 
 bool FocusClockApp::Create(HINSTANCE instance, int show) {
     instance_ = instance;
+    if (std::none_of(panelTabs_.begin(), panelTabs_.end(), [](const PanelTabDefinition& tab) {
+        return tab.id == kPanelTabRerunId;
+    })) {
+        panelTabs_.push_back(PanelTabDefinition{ kPanelTabRerunId, L"防重启" });
+    }
+
     const wchar_t* className = L"FocusClockWindow";
 
     WNDCLASSEXW wc{};
@@ -357,7 +376,11 @@ bool FocusClockApp::Create(HINSTANCE instance, int show) {
     RegisterHotKey(hwnd_, kPanelHotkeyId, 0, VK_F6);
     SetTimer(hwnd_, kClockTimer, kClockTimerMs, nullptr);
     SetTimer(hwnd_, kGuardTimer, kGuardTimerMs, nullptr);
-    CheckScheduledFocusTasks(true);
+    if (rerunResumeSeconds_ > 0) {
+        StartFocusForSeconds(rerunResumeSeconds_, false);
+    } else {
+        CheckScheduledFocusTasks(true);
+    }
     return true;
 }
 
@@ -809,12 +832,15 @@ void FocusClockApp::StartFocus() {
     StartFocusForSeconds(selectedMinutes_ * 60LL);
 }
 
-void FocusClockApp::StartFocusForSeconds(long long durationSeconds) {
+void FocusClockApp::StartFocusForSeconds(long long durationSeconds, bool updateSessionSettings) {
     ClosePanel();
     focusActive_ = true;
     InstallFocusKeyboardHook();
     remainingSeconds_ = std::max(1LL, durationSeconds);
     focusEnd_ = std::chrono::steady_clock::now() + std::chrono::seconds(remainingSeconds_);
+    if (updateSessionSettings) {
+        SaveFocusSessionSettings(remainingSeconds_);
+    }
     EnterFullscreenTopmost();
     RebuildLayout();
     InvalidateRect(hwnd_, nullptr, FALSE);
@@ -822,6 +848,7 @@ void FocusClockApp::StartFocusForSeconds(long long durationSeconds) {
 
 void FocusClockApp::FinishFocus() {
     focusActive_ = false;
+    ClearFocusSessionSettings();
     RemoveFocusKeyboardHook();
     activeWhitelistWindow_ = nullptr;
     pendingWhitelistIndex_ = -1;
@@ -1009,6 +1036,15 @@ void FocusClockApp::RebuildLayout() {
                 true,
                 false,
                 true);
+        } else if (activePanelTab_ == kPanelTabRerunId) {
+            AddPanelButton(
+                kRerunCreateTaskId,
+                RECT{ contentLeft, panelBounds_.top + 184, contentLeft + 250, panelBounds_.top + 232 },
+                L"添加开机自启任务",
+                false,
+                true,
+                true,
+                false);
         }
     } else {
         panelBounds_ = RECT{};
@@ -1305,6 +1341,8 @@ void FocusClockApp::DrawPanel(Graphics& g, const RECT& rc) {
         g.Restore(state);
     } else if (activePanelTab_ == kPanelTabSettingsId) {
         DrawSettingsTab(g, contentRect, theme, family);
+    } else if (activePanelTab_ == kPanelTabRerunId) {
+        DrawRerunTab(g, contentRect, theme, family);
     }
 }
 
@@ -1391,6 +1429,41 @@ void FocusClockApp::DrawScheduleTab(Graphics& g, const RectF& contentRect, const
         REAL thumbHeight = std::max(40.0f, trackHeight * (trackHeight / (trackHeight + maxScroll)));
         REAL thumbY = trackY + (trackHeight - thumbHeight) * (static_cast<REAL>(scheduleScrollOffset_) / maxScroll);
         g.FillRectangle(&thumbBrush, trackX, thumbY, 4.0f, thumbHeight);
+    }
+}
+
+void FocusClockApp::DrawRerunTab(Graphics& g, const RectF& contentRect, const Theme& theme, FontFamily& family) {
+    Font headingFont(&family, 24, FontStyleRegular, UnitPixel);
+    Font bodyFont(&family, 17, FontStyleRegular, UnitPixel);
+    Font helpFont(&family, 15, FontStyleRegular, UnitPixel);
+
+    DrawTextBlock(g, L"防重启", RectF(contentRect.X, contentRect.Y, contentRect.Width, 34.0f), headingFont, theme.primaryText, StringAlignmentNear, StringAlignmentCenter);
+    std::wstring status = rerunTaskMessage_.empty() ? L"状态：等待添加" : rerunTaskMessage_;
+    Color statusColor = rerunTaskMessageIsError_ ? theme.danger : theme.secondaryText;
+    DrawTextBlock(g, status, RectF(contentRect.X, contentRect.Y + 164.0f, contentRect.Width, 44.0f), helpFont, statusColor, StringAlignmentNear, StringAlignmentCenter);
+    return;
+
+    DrawTextBlock(g, L"防重启", RectF(contentRect.X, contentRect.Y, contentRect.Width, 34.0f), headingFont, theme.primaryText, StringAlignmentNear, StringAlignmentCenter);
+    DrawTextBlock(
+        g,
+        L"添加一个当前用户登录时运行的计划任务。它会用 -rerun 参数启动 FocusClock，并只在未完成的专注时段内恢复窗口。",
+        RectF(contentRect.X, contentRect.Y + 48.0f, contentRect.Width, 72.0f),
+        bodyFont,
+        theme.secondaryText,
+        StringAlignmentNear,
+        StringAlignmentNear);
+    DrawTextBlock(
+        g,
+        L"如果电脑在专注期间重启，登录后会根据 FocusClock.ini 的 FocusSession 记录继续剩余时间；不在时段内则自动退出。",
+        RectF(contentRect.X, contentRect.Y + 132.0f, contentRect.Width, 64.0f),
+        helpFont,
+        theme.mutedText,
+        StringAlignmentNear,
+        StringAlignmentNear);
+
+    if (!rerunTaskMessage_.empty()) {
+        Color messageColor = rerunTaskMessageIsError_ ? theme.danger : theme.secondaryText;
+        DrawTextBlock(g, rerunTaskMessage_, RectF(contentRect.X, contentRect.Y + 286.0f, contentRect.Width, 44.0f), helpFont, messageColor, StringAlignmentNear, StringAlignmentCenter);
     }
 }
 
@@ -1784,6 +1857,53 @@ void FocusClockApp::SaveAppSettings() const {
     WritePrivateProfileStringW(L"Focus", L"DefaultMinutes", buffer, path.c_str());
 }
 
+void FocusClockApp::SaveFocusSessionSettings(long long durationSeconds) const {
+    FILETIME startUtc{};
+    GetSystemTimeAsFileTime(&startUtc);
+
+    ULARGE_INTEGER endValue{};
+    endValue.LowPart = startUtc.dwLowDateTime;
+    endValue.HighPart = startUtc.dwHighDateTime;
+    endValue.QuadPart += static_cast<ULONGLONG>(std::max(1LL, durationSeconds)) * 10000000ULL;
+
+    FILETIME endUtc{};
+    endUtc.dwLowDateTime = endValue.LowPart;
+    endUtc.dwHighDateTime = endValue.HighPart;
+
+    FILETIME startLocalFileTime{};
+    FILETIME endLocalFileTime{};
+    SYSTEMTIME startLocal{};
+    SYSTEMTIME endLocal{};
+    FileTimeToLocalFileTime(&startUtc, &startLocalFileTime);
+    FileTimeToLocalFileTime(&endUtc, &endLocalFileTime);
+    FileTimeToSystemTime(&startLocalFileTime, &startLocal);
+    FileTimeToSystemTime(&endLocalFileTime, &endLocal);
+
+    std::wstring path = GetSettingsPath();
+    wchar_t buffer[64]{};
+
+    WritePrivateProfileStringW(L"FocusSession", L"Active", L"1", path.c_str());
+
+    swprintf_s(buffer, L"%lld", durationSeconds);
+    WritePrivateProfileStringW(L"FocusSession", L"DurationSeconds", buffer, path.c_str());
+
+    swprintf_s(buffer, L"%lld", (durationSeconds + 59) / 60);
+    WritePrivateProfileStringW(L"FocusSession", L"DurationMinutes", buffer, path.c_str());
+
+    swprintf_s(buffer, L"%lld", FileTimeToUnixSeconds(startUtc));
+    WritePrivateProfileStringW(L"FocusSession", L"StartUnix", buffer, path.c_str());
+
+    swprintf_s(buffer, L"%lld", FileTimeToUnixSeconds(endUtc));
+    WritePrivateProfileStringW(L"FocusSession", L"EndUnix", buffer, path.c_str());
+
+    WritePrivateProfileStringW(L"FocusSession", L"StartLocal", FormatConfigDateTime(startLocal).c_str(), path.c_str());
+    WritePrivateProfileStringW(L"FocusSession", L"EndLocal", FormatConfigDateTime(endLocal).c_str(), path.c_str());
+}
+
+void FocusClockApp::ClearFocusSessionSettings() const {
+    WritePrivateProfileStringW(L"FocusSession", nullptr, nullptr, GetSettingsPath().c_str());
+}
+
 void FocusClockApp::ResetAppSettings() {
     SetMaxFocusMinutes(kDefaultMaxFocusMinutes);
     SetDefaultFocusMinutes(kDefaultFocusMinutes);
@@ -1886,6 +2006,8 @@ void FocusClockApp::HandlePanelCommand(int id) {
         AddScheduledFocusTask();
     } else if (id >= kScheduleDeleteButtonBaseId && id < kScheduleDeleteButtonLimit) {
         DeleteScheduledFocusTask(static_cast<size_t>(id - kScheduleDeleteButtonBaseId));
+    } else if (id == kRerunCreateTaskId) {
+        CreateRerunStartupTask();
     }
 }
 
@@ -2100,6 +2222,73 @@ void FocusClockApp::CheckScheduledFocusTasks(bool forceResumeActiveRange) {
         StartFocusForSeconds(remainingSeconds);
         return;
     }
+}
+
+void FocusClockApp::CreateRerunStartupTask() {
+    std::wstring exePath(MAX_PATH, L'\0');
+    DWORD length = GetModuleFileNameW(nullptr, exePath.data(), static_cast<DWORD>(exePath.size()));
+    while (length == exePath.size()) {
+        exePath.resize(exePath.size() * 2);
+        length = GetModuleFileNameW(nullptr, exePath.data(), static_cast<DWORD>(exePath.size()));
+    }
+
+    if (length == 0) {
+        rerunTaskMessage_ = L"无法获取程序路径，计划任务未创建。";
+        rerunTaskMessageIsError_ = true;
+        RebuildLayout();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+
+    exePath.resize(length);
+    std::wstring taskRun = L"\\\"" + exePath + L"\\\" -rerun";
+    std::wstring command =
+        L"\"C:\\Windows\\System32\\schtasks.exe\" /Create /TN \"FocusClock Rerun\" /SC ONLOGON /RL LIMITED /TR \"" +
+        taskRun +
+        L"\" /F";
+
+    STARTUPINFOW startup{};
+    startup.cb = sizeof(startup);
+    startup.dwFlags = STARTF_USESHOWWINDOW;
+    startup.wShowWindow = SW_HIDE;
+
+    PROCESS_INFORMATION process{};
+    std::vector<wchar_t> commandBuffer(command.begin(), command.end());
+    commandBuffer.push_back(L'\0');
+
+    BOOL created = CreateProcessW(
+        nullptr,
+        commandBuffer.data(),
+        nullptr,
+        nullptr,
+        FALSE,
+        CREATE_NO_WINDOW,
+        nullptr,
+        nullptr,
+        &startup,
+        &process);
+
+    if (!created) {
+        rerunTaskMessage_ = L"创建计划任务失败，请确认系统允许当前用户使用任务计划程序。";
+        rerunTaskMessageIsError_ = true;
+    } else {
+        WaitForSingleObject(process.hProcess, 10000);
+        DWORD exitCode = 1;
+        GetExitCodeProcess(process.hProcess, &exitCode);
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+
+        if (exitCode == 0) {
+            rerunTaskMessage_ = L"已添加计划任务：FocusClock Rerun。下次登录时会用 -rerun 参数检查是否需要恢复专注。";
+            rerunTaskMessageIsError_ = false;
+        } else {
+            rerunTaskMessage_ = L"计划任务命令执行失败，可以尝试以普通用户重新运行程序后再添加。";
+            rerunTaskMessageIsError_ = true;
+        }
+    }
+
+    RebuildLayout();
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 bool FocusClockApp::HasScheduleConflict(int startMinute, int endMinute, int ignoreIndex) const {
@@ -2492,6 +2681,31 @@ HICON FocusClockApp::LoadIconForPath(const std::wstring& path) {
     return CopyIcon(LoadIconW(nullptr, IDI_APPLICATION));
 }
 
+std::wstring FocusClockApp::FormatConfigDateTime(const SYSTEMTIME& time) {
+    wchar_t buffer[32]{};
+    swprintf_s(
+        buffer,
+        L"%04u-%02u-%02u %02u:%02u:%02u",
+        time.wYear,
+        time.wMonth,
+        time.wDay,
+        time.wHour,
+        time.wMinute,
+        time.wSecond);
+    return buffer;
+}
+
+long long FocusClockApp::FileTimeToUnixSeconds(const FILETIME& fileTime) {
+    ULARGE_INTEGER value{};
+    value.LowPart = fileTime.dwLowDateTime;
+    value.HighPart = fileTime.dwHighDateTime;
+    constexpr ULONGLONG unixEpochOffset = 116444736000000000ULL;
+    if (value.QuadPart < unixEpochOffset) {
+        return 0;
+    }
+    return static_cast<long long>((value.QuadPart - unixEpochOffset) / 10000000ULL);
+}
+
 std::wstring FocusClockApp::DecodeTextFile(const std::vector<char>& bytes) {
     if (bytes.empty()) {
         return L"";
@@ -2569,9 +2783,132 @@ BOOL CALLBACK FocusClockApp::EnumWhitelistedWindowsForRestore(HWND window, LPARA
 
 } // namespace
 
+namespace {
+
+std::wstring CurrentExecutableDirectory() {
+    std::wstring path(MAX_PATH, L'\0');
+    DWORD length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+    while (length == path.size()) {
+        path.resize(path.size() * 2);
+        length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
+    }
+
+    if (length == 0) {
+        return L".";
+    }
+
+    path.resize(length);
+    size_t slash = path.find_last_of(L"\\/");
+    if (slash == std::wstring::npos) {
+        return L".";
+    }
+    return path.substr(0, slash);
+}
+
+long long CurrentUnixSeconds() {
+    FILETIME nowFileTime{};
+    GetSystemTimeAsFileTime(&nowFileTime);
+    ULARGE_INTEGER value{};
+    value.LowPart = nowFileTime.dwLowDateTime;
+    value.HighPart = nowFileTime.dwHighDateTime;
+    constexpr ULONGLONG unixEpochOffset = 116444736000000000ULL;
+    if (value.QuadPart < unixEpochOffset) {
+        return 0;
+    }
+    return static_cast<long long>((value.QuadPart - unixEpochOffset) / 10000000ULL);
+}
+
+bool HasCommandLineSwitch(const wchar_t* target) {
+    int argc = 0;
+    LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    if (!argv) {
+        return false;
+    }
+
+    bool found = false;
+    for (int i = 1; i < argc; ++i) {
+        if (_wcsicmp(argv[i], target) == 0) {
+            found = true;
+            break;
+        }
+    }
+
+    LocalFree(argv);
+    return found;
+}
+
+long long RerunRemainingSecondsFromSettings() {
+    std::wstring settingsPath = CurrentExecutableDirectory() + L"\\FocusClock.ini";
+    int active = GetPrivateProfileIntW(L"FocusSession", L"Active", 0, settingsPath.c_str());
+    if (active != 1) {
+        return 0;
+    }
+
+    wchar_t buffer[64]{};
+    GetPrivateProfileStringW(L"FocusSession", L"StartUnix", L"0", buffer, static_cast<DWORD>(std::size(buffer)), settingsPath.c_str());
+    long long startUnix = _wtoi64(buffer);
+
+    GetPrivateProfileStringW(L"FocusSession", L"EndUnix", L"0", buffer, static_cast<DWORD>(std::size(buffer)), settingsPath.c_str());
+    long long endUnix = _wtoi64(buffer);
+
+    long long now = CurrentUnixSeconds();
+    if (startUnix <= 0 || endUnix <= startUnix || now < startUnix || now >= endUnix) {
+        return 0;
+    }
+
+    return std::max(1LL, endUnix - now);
+}
+
+bool IsValidStoredScheduleRange(int startMinute, int endMinute) {
+    return startMinute >= 0 && endMinute <= 24 * 60 && startMinute < endMinute;
+}
+
+bool HasActiveScheduledFocusRange() {
+    std::wstring settingsPath = CurrentExecutableDirectory() + L"\\FocusClock.ini";
+    int count = GetPrivateProfileIntW(L"Schedule", L"Count", 0, settingsPath.c_str());
+    count = std::clamp(count, 0, 64);
+
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    int minuteOfDay = now.wHour * 60 + now.wMinute;
+
+    for (int i = 0; i < count; ++i) {
+        std::wstring key = L"Task" + std::to_wstring(i);
+        wchar_t buffer[64]{};
+        GetPrivateProfileStringW(L"Schedule", key.c_str(), L"", buffer, static_cast<DWORD>(std::size(buffer)), settingsPath.c_str());
+
+        std::wstring value = buffer;
+        size_t comma = value.find(L',');
+        if (comma == std::wstring::npos) {
+            continue;
+        }
+
+        size_t secondComma = value.find(L',', comma + 1);
+        int startMinute = _wtoi(value.substr(0, comma).c_str());
+        int endMinute = _wtoi(value.substr(comma + 1, secondComma == std::wstring::npos ? std::wstring::npos : secondComma - comma - 1).c_str());
+        if (IsValidStoredScheduleRange(startMinute, endMinute) &&
+            minuteOfDay >= startMinute &&
+            minuteOfDay < endMinute) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+} // namespace
+
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     SetProcessDPIAware();
 
+    long long rerunResumeSeconds = 0;
+    if (HasCommandLineSwitch(L"-rerun")) {
+        rerunResumeSeconds = RerunRemainingSecondsFromSettings();
+        if (rerunResumeSeconds <= 0 && !HasActiveScheduledFocusRange()) {
+            return 0;
+        }
+    }
+
     FocusClockApp app;
-    return app.Run(instance, show);
+    return app.Run(instance, show, rerunResumeSeconds);
 }
