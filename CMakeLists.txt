@@ -5,6 +5,11 @@ project(FocusClock LANGUAGES CXX RC)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+foreach(CONFIG DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${CONFIG} "${CMAKE_BINARY_DIR}")
+endforeach()
+
 add_executable(FocusClock WIN32
     src/AppCore.cpp
     src/Layout.cpp
@@ -22,6 +27,10 @@ add_executable(FocusClock WIN32
 
 if(MINGW)
     target_link_options(FocusClock PRIVATE -municode -static -static-libgcc -static-libstdc++)
+endif()
+
+if(MSVC)
+    target_compile_options(FocusClock PRIVATE /utf-8)
 endif()
 
 target_compile_definitions(FocusClock PRIVATE

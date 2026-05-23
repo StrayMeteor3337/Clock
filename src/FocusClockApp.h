@@ -4,6 +4,7 @@
 #include <windowsx.h>
 #include <commdlg.h>
 #include <dwmapi.h>
+#include <objbase.h>
 #include <gdiplus.h>
 #include <shellapi.h>
 #include <shlobj.h>

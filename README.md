@@ -43,8 +43,8 @@
 也可以手动构建：
 
 ```powershell
-cmake -S . -B build -G "MinGW Makefiles"
-cmake --build build
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
 ```
 
 生成程序位于：
