@@ -1256,7 +1256,7 @@ void FocusClockApp::RebuildLayout() {
     const int appTop = whitelistTop_;
     const int appBottomLimit = height - 112;
     const int appRows = std::max(0, (appBottomLimit - appTop - 40) / (appButtonSize + appGap));
-    const int appCapacity = std::max(0, std::min(12, appRows * appColumns));
+    const int appCapacity = std::max(0, std::min(kWhitelistButtonLimit - kWhitelistButtonBaseId, appRows * appColumns));
     const int appCount = std::min(static_cast<int>(whitelistEntries_.size()), appCapacity);
     whitelistBounds_ = RECT{ appLeft, appTop, appLeft + appGridWidth, appTop + 40 };
 
@@ -2040,7 +2040,7 @@ void FocusClockApp::RebuildWhitelistLayoutOnly() {
     const int appTop = whitelistTop_;
     const int appBottomLimit = height - 112;
     const int appRows = std::max(0, (appBottomLimit - appTop - 40) / (appButtonSize + appGap));
-    const int appCapacity = std::max(0, std::min(12, appRows * appColumns));
+    const int appCapacity = std::max(0, std::min(kWhitelistButtonLimit - kWhitelistButtonBaseId, appRows * appColumns));
     const int appCount = std::min(static_cast<int>(whitelistEntries_.size()), appCapacity);
     whitelistBounds_ = RECT{ appLeft, appTop, appLeft + appGridWidth, appTop + 40 };
 
