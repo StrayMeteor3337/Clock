@@ -1,12 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(FocusClock LANGUAGES CXX)
+project(FocusClock LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(FocusClock WIN32
     src/main.cpp
+    src/Res/FocusClock.rc
 )
 
 if(MINGW)

@@ -8,6 +8,8 @@
 #include <tlhelp32.h>
 #include <winhttp.h>
 
+#include "Res/resource.h"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -486,8 +488,8 @@ bool FocusClockApp::Create(HINSTANCE instance, int show) {
     wc.lpfnWndProc = FocusClockApp::WindowProc;
     wc.hInstance = instance;
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    wc.hIconSm = LoadIconW(nullptr, IDI_APPLICATION);
+    wc.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_APP_ICON));
+    wc.hIconSm = LoadIconW(instance, MAKEINTRESOURCEW(IDI_APP_ICON));
     wc.lpszClassName = className;
     wc.hbrBackground = nullptr;
 
@@ -1412,6 +1414,11 @@ void FocusClockApp::Paint() {
 
     SYSTEMTIME now{};
     GetLocalTime(&now);
+
+    if (focusActive_) {
+        RectF topProgressRect(0.0f, 0.0f, static_cast<REAL>(width), 4.0f);
+        DrawFocusProgressBar(g, topProgressRect, theme);
+    }
 
     int clockSize = std::min(width, height) / 3;
     clockSize = std::max(220, std::min(clockSize, 390));
