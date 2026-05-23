@@ -564,6 +564,16 @@ bool FocusClockApp::TryResolvePendingWhitelistWindow() {
     return true;
 }
 
+bool FocusClockApp::HasAnyWhitelistWindowVisible() {
+    for (const auto& entry : whitelistEntries_) {
+        HWND running = FindRunningWhitelistWindow(entry);
+        if (running) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool FocusClockApp::IsWhitelistedForegroundWindow() {
     HWND foreground = GetForegroundWindow();
     if (!foreground || foreground == hwnd_) {

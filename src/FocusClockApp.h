@@ -1,8 +1,11 @@
 #pragma once
 
+#define _WIN32_IE 0x0600
 #include <windows.h>
 #include <windowsx.h>
 #include <commdlg.h>
+#include <commctrl.h>
+#include <commoncontrols.h>
 #include <dwmapi.h>
 #include <gdiplus.h>
 #include <shellapi.h>
@@ -293,6 +296,7 @@ private:
     std::wstring FormatRemaining() const;
     bool IsSystemDarkMode() const;
     bool IsWhitelistedForegroundWindow();
+    bool HasAnyWhitelistWindowVisible();
     bool IsExecutableWhitelisted(const std::wstring& path) const;
     bool ShouldYieldToWhitelist() const;
     std::wstring GetExecutableDirectory() const;

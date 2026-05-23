@@ -157,6 +157,9 @@ LRESULT FocusClockApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
     case WM_TIMER:
         if (wparam == kClockTimer) {
             UpdateRemaining();
+            if (remainingSeconds_ <= 0 && focusActive_) {
+                FinishFocus();
+            }
             InvalidateRect(hwnd, nullptr, FALSE);
         } else if (wparam == kGuardTimer) {
             if (LoadWhitelistIfNeeded()) {
@@ -166,8 +169,12 @@ LRESULT FocusClockApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
             CheckScheduledFocusTasks();
             if (focusActive_) {
                 TryResolvePendingWhitelistWindow();
-                if ((ShouldYieldToWhitelist() || IsWhitelistedForegroundWindow()) && IsTrackedWhitelistWindowValid()) {
-                    EnterFullscreenBelow(activeWhitelistWindow_);
+                IsWhitelistedForegroundWindow();
+                // 只要有任意白名单窗口存在，就保持非 TOPMOST 模式，
+                // 使所有白名单窗口都能正常显示和交互
+                if (ShouldYieldToWhitelist() || HasAnyWhitelistWindowVisible()) {
+                    PromoteAllWhitelistWindows();
+                    EnterFullscreenNotTopmost();
                 } else {
                     activeWhitelistWindow_ = nullptr;
                     EnterFullscreenTopmost();
@@ -356,6 +363,12 @@ LRESULT FocusClockApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     SetProcessDPIAware();
+
+    // 初始化公共控件库（SHGetImageList 需要 comctl32.dll 版本 6）
+    INITCOMMONCONTROLSEX icc = {};
+    icc.dwSize = sizeof(icc);
+    icc.dwICC = ICC_STANDARD_CLASSES | ICC_USEREX_CLASSES;
+    InitCommonControlsEx(&icc);
 
     long long rerunResumeSeconds = 0;
     if (HasCommandLineSwitch(L"-rerun")) {

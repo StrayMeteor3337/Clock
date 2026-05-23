@@ -32,6 +32,7 @@ target_compile_definitions(FocusClock PRIVATE
 )
 
 target_link_libraries(FocusClock PRIVATE
+    comctl32
     comdlg32
     gdiplus
     dwmapi
