@@ -12,6 +12,7 @@ endforeach()
 
 add_executable(FocusClock WIN32
     src/AppCore.cpp
+    src/Hook.cpp
     src/Layout.cpp
     src/main.cpp
     src/Panel.cpp
