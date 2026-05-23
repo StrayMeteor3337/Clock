@@ -6,8 +6,18 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(FocusClock WIN32
+    src/AppCore.cpp
+    src/Layout.cpp
     src/main.cpp
+    src/Panel.cpp
+    src/Rendering.cpp
     src/Res/FocusClock.rc
+    src/Rerun.cpp
+    src/Schedule.cpp
+    src/Settings.cpp
+    src/Update.cpp
+    src/Utilities.cpp
+    src/Whitelist.cpp
 )
 
 if(MINGW)
