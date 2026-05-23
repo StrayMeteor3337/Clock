@@ -5,4 +5,7 @@ build/
 *.ilk
 *.user
 *.suo
+*.o
 .vs/
+.vscode/
+out/
