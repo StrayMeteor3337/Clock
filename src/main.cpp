@@ -4,6 +4,7 @@
 #include <dwmapi.h>
 #include <gdiplus.h>
 #include <shellapi.h>
+#include <shlobj.h>
 #include <tlhelp32.h>
 
 #include <algorithm>
@@ -12,7 +13,9 @@
 #include <cmath>
 #include <cwctype>
 #include <map>
+#include <memory>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -25,7 +28,7 @@ constexpr UINT_PTR kGuardTimer = 2;
 constexpr UINT_PTR kWhitelistLayoutTimer = 3;
 constexpr int kClockTimerMs = 250;
 constexpr int kGuardTimerMs = 1000;
-constexpr int kWhitelistLayoutTimerMs = 2;
+constexpr int kWhitelistLayoutTimerMs = 16;
 constexpr DWORD kWhitelistLayoutSaveDelayMs = 700;
 constexpr double kPi = 3.14159265358979323846;
 constexpr int kMinFocusMinutes = 1;
@@ -77,7 +80,8 @@ constexpr int kScheduleDeleteButtonBaseId = 3400;
 constexpr int kScheduleDeleteButtonLimit = 3600;
 constexpr int kRerunCreateTaskId = 3601;
 constexpr int kWhitelistAddFileId = 3701;
-constexpr int kWhitelistAddProcessId = 3702;
+constexpr int kWhitelistAddFolderId = 3702;
+constexpr int kWhitelistAddProcessId = 3703;
 constexpr int kWhitelistDeleteButtonBaseId = 3800;
 constexpr int kWhitelistDeleteButtonLimit = 4000;
 constexpr int kPanelHotkeyId = 4001;
@@ -87,6 +91,11 @@ constexpr int kMaxWhitelistIconSize = 120;
 constexpr int kDefaultWhitelistIconSize = 72;
 constexpr int kWhitelistMoveStep = 10;
 constexpr int kWhitelistResizeStep = 6;
+constexpr UINT kRerunTaskCommandFinishedMessage = WM_APP + 1;
+constexpr WPARAM kRerunTaskCreateCommand = 1;
+constexpr WPARAM kRerunTaskStatusCommand = 2;
+constexpr DWORD kRerunTaskLaunchFailed = 0xFFFFFFFF;
+constexpr DWORD kRerunTaskTimedOut = 0xFFFFFFFE;
 
 constexpr DWORD kDwmwaUseImmersiveDarkMode = 20;
 
@@ -106,6 +115,7 @@ struct UiButton {
     RECT rect{};
     std::wstring label;
     std::wstring iconPath;
+    HICON icon = nullptr;
     int id = 0;
     bool enabled = true;
     bool selected = false;
@@ -125,6 +135,7 @@ struct WhitelistEntry {
     std::wstring exeName;
     std::wstring iconPath;
     std::wstring label;
+    HICON icon = nullptr;
 };
 
 struct ProcessPathChoice {
@@ -149,6 +160,7 @@ struct FindWindowContext {
 
 class FocusClockApp {
 public:
+    ~FocusClockApp();
     int Run(HINSTANCE instance, int show, long long rerunResumeSeconds = 0);
 
 private:
@@ -165,6 +177,8 @@ private:
     void EnterFullscreenBelow(HWND aboveWindow);
     void ApplyDarkMode();
     void RefreshTheme();
+    void EnsurePaintFonts(int width);
+    void ReleaseRenderResources();
     bool LoadWhitelistIfNeeded(bool force = false);
     void StartFocus();
     void StartFocusForSeconds(long long durationSeconds, bool updateSessionSettings = true, long long totalSeconds = 0);
@@ -225,12 +239,18 @@ private:
     void CheckScheduledFocusTasks(bool forceResumeActiveRange = false);
     void CreateRerunStartupTask();
     void CheckRerunStartupTaskStatus();
+    void RunRerunTaskCommandAsync(std::wstring command, WPARAM commandKind, DWORD timeoutMs);
+    void HandleRerunTaskCommandResult(WPARAM commandKind, LPARAM result);
     std::wstring GetWhitelistPath() const;
+    void DestroyWhitelistIconCache();
     bool SaveWhitelistEntries(const std::vector<std::wstring>& launchSpecs);
     void AddWhitelistPath(const std::wstring& path);
+    void AddWhitelistFolder(const std::wstring& folder);
     void AddWhitelistFromFileDialog();
+    void AddWhitelistFromFolderDialog();
     void AddWhitelistFromRunningProcess();
     void DeleteWhitelistEntry(size_t index);
+    std::vector<std::wstring> EnumerateExecutableFilesInDirectory(const std::wstring& folder) const;
     std::vector<ProcessPathChoice> EnumerateRunningProcessPaths() const;
     bool IsWhitelistPathDuplicate(const std::wstring& path) const;
     bool HasScheduleConflict(int startMinute, int endMinute, int ignoreIndex = -1) const;
@@ -266,6 +286,8 @@ private:
     static std::wstring ToLower(std::wstring value);
     static std::wstring Trim(std::wstring value);
     static std::wstring BaseName(const std::wstring& path);
+    static bool IsExecutableFileName(const std::wstring& filename);
+    static std::wstring JoinPath(const std::wstring& directory, const std::wstring& name);
     static std::wstring StripExtension(const std::wstring& filename);
     static std::wstring ResolveLaunchPath(const std::wstring& launchSpec);
     static HICON LoadIconForPath(const std::wstring& path);
@@ -279,6 +301,15 @@ private:
     HINSTANCE instance_ = nullptr;
     HHOOK keyboardHook_ = nullptr;
     ULONG_PTR gdiplusToken_ = 0;
+    std::unique_ptr<FontFamily> uiFontFamily_;
+    std::unique_ptr<FontFamily> monoFontFamily_;
+    std::unique_ptr<Font> digitalFont_;
+    std::unique_ptr<Font> dateFont_;
+    std::unique_ptr<Font> statusFont_;
+    std::unique_ptr<Font> remainFont_;
+    std::unique_ptr<Font> focusHintFont_;
+    std::unique_ptr<Font> idleHintFont_;
+    int cachedPaintFontWidth_ = 0;
     bool darkMode_ = false;
     bool focusActive_ = false;
     bool panelOpen_ = false;
@@ -335,6 +366,11 @@ private:
 
 FocusClockApp* gKeyboardHookApp = nullptr;
 
+FocusClockApp::~FocusClockApp() {
+    ReleaseRenderResources();
+    DestroyWhitelistIconCache();
+}
+
 int FocusClockApp::Run(HINSTANCE instance, int show, long long rerunResumeSeconds) {
     rerunResumeSeconds_ = rerunResumeSeconds;
 
@@ -344,7 +380,11 @@ int FocusClockApp::Run(HINSTANCE instance, int show, long long rerunResumeSecond
         return 1;
     }
 
+    uiFontFamily_ = std::make_unique<FontFamily>(L"Segoe UI");
+    monoFontFamily_ = std::make_unique<FontFamily>(L"Consolas");
+
     if (!Create(instance, show)) {
+        ReleaseRenderResources();
         GdiplusShutdown(gdiplusToken_);
         return 1;
     }
@@ -355,6 +395,7 @@ int FocusClockApp::Run(HINSTANCE instance, int show, long long rerunResumeSecond
         DispatchMessageW(&msg);
     }
 
+    ReleaseRenderResources();
     GdiplusShutdown(gdiplusToken_);
     return static_cast<int>(msg.wParam);
 }
@@ -505,6 +546,10 @@ LRESULT FocusClockApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
         RefreshTheme();
         ApplyDarkMode();
         InvalidateRect(hwnd, nullptr, FALSE);
+        return 0;
+
+    case kRerunTaskCommandFinishedMessage:
+        HandleRerunTaskCommandResult(wparam, lparam);
         return 0;
 
     case WM_TIMER:
@@ -816,6 +861,7 @@ bool FocusClockApp::LoadWhitelistIfNeeded(bool force) {
     bool exists = GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data) != FALSE;
     if (!exists) {
         if (force || whitelistKnown_) {
+            DestroyWhitelistIconCache();
             whitelistEntries_.clear();
             whitelistWriteTime_ = FILETIME{};
             whitelistKnown_ = false;
@@ -863,6 +909,7 @@ bool FocusClockApp::LoadWhitelistIfNeeded(bool force) {
                 entry.normalized = ToLower(line);
                 entry.exeName = BaseName(entry.normalized);
                 entry.iconPath = ResolveLaunchPath(line);
+                entry.icon = LoadIconForPath(entry.iconPath);
                 entry.label = StripExtension(BaseName(line));
                 if (entry.label.empty()) {
                     entry.label = line;
@@ -880,6 +927,7 @@ bool FocusClockApp::LoadWhitelistIfNeeded(bool force) {
         }
     }
 
+    DestroyWhitelistIconCache();
     whitelistEntries_ = std::move(entries);
     whitelistWriteTime_ = data.ftLastWriteTime;
     whitelistKnown_ = true;
@@ -893,6 +941,37 @@ void FocusClockApp::RefreshTheme() {
         ApplyDarkMode();
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
+}
+
+void FocusClockApp::EnsurePaintFonts(int width) {
+    if (!uiFontFamily_ || !monoFontFamily_) {
+        return;
+    }
+
+    if (cachedPaintFontWidth_ == width && digitalFont_ && dateFont_ && statusFont_ && remainFont_ && focusHintFont_ && idleHintFont_) {
+        return;
+    }
+
+    cachedPaintFontWidth_ = width;
+    REAL digitalSize = static_cast<REAL>(std::max(56, std::min(132, width / 10)));
+    digitalFont_ = std::make_unique<Font>(monoFontFamily_.get(), digitalSize, FontStyleRegular, UnitPixel);
+    dateFont_ = std::make_unique<Font>(uiFontFamily_.get(), static_cast<REAL>(std::max(20, std::min(34, width / 48))), FontStyleRegular, UnitPixel);
+    statusFont_ = std::make_unique<Font>(uiFontFamily_.get(), static_cast<REAL>(std::max(22, std::min(40, width / 42))), FontStyleRegular, UnitPixel);
+    remainFont_ = std::make_unique<Font>(monoFontFamily_.get(), static_cast<REAL>(std::max(48, std::min(96, width / 14))), FontStyleRegular, UnitPixel);
+    focusHintFont_ = std::make_unique<Font>(uiFontFamily_.get(), 18.0f, FontStyleRegular, UnitPixel);
+    idleHintFont_ = std::make_unique<Font>(uiFontFamily_.get(), 20.0f, FontStyleRegular, UnitPixel);
+}
+
+void FocusClockApp::ReleaseRenderResources() {
+    digitalFont_.reset();
+    dateFont_.reset();
+    statusFont_.reset();
+    remainFont_.reset();
+    focusHintFont_.reset();
+    idleHintFont_.reset();
+    cachedPaintFontWidth_ = 0;
+    monoFontFamily_.reset();
+    uiFontFamily_.reset();
 }
 
 void FocusClockApp::StartFocus() {
@@ -1119,22 +1198,30 @@ void FocusClockApp::RebuildLayout() {
             int scrollY = whitelistScrollOffset_;
             AddPanelButton(
                 kWhitelistAddFileId,
-                RECT{ contentLeft, panelBounds_.top + 150 - scrollY, contentLeft + 158, panelBounds_.top + 194 - scrollY },
+                RECT{ contentLeft, panelBounds_.top + 150 - scrollY, contentLeft + 126, panelBounds_.top + 194 - scrollY },
                 L"选择文件添加",
                 false,
                 true,
                 true,
                 false);
             AddPanelButton(
+                kWhitelistAddFolderId,
+                RECT{ contentLeft + 138, panelBounds_.top + 150 - scrollY, contentLeft + 264, panelBounds_.top + 194 - scrollY },
+                L"选择文件夹",
+                false,
+                true,
+                false,
+                false);
+            AddPanelButton(
                 kWhitelistAddProcessId,
-                RECT{ contentLeft + 174, panelBounds_.top + 150 - scrollY, contentLeft + 356, panelBounds_.top + 194 - scrollY },
+                RECT{ contentLeft, panelBounds_.top + 200 - scrollY, contentLeft + 182, panelBounds_.top + 244 - scrollY },
                 L"从运行进程添加",
                 false,
                 true,
                 false,
                 false);
 
-            int listTop = panelBounds_.top + 282 - scrollY;
+            int listTop = panelBounds_.top + 336 - scrollY;
             int rowHeight = 36;
             RECT viewport = PanelContentViewport();
             for (int i = 0; i < static_cast<int>(whitelistEntries_.size()); ++i) {
@@ -1182,6 +1269,7 @@ void FocusClockApp::RebuildLayout() {
         app.rect = RECT{ left, top, left + appButtonSize, top + appButtonSize };
         app.label = whitelistEntries_[i].label;
         app.iconPath = whitelistEntries_[i].iconPath;
+        app.icon = whitelistEntries_[i].icon;
         app.id = kWhitelistButtonBaseId + i;
         app.primary = focusActive_;
         app.iconOnly = true;
@@ -1238,14 +1326,10 @@ void FocusClockApp::Paint() {
         static_cast<REAL>(clockSize));
     DrawAnalogClock(g, clockRect, now);
 
-    FontFamily family(L"Segoe UI");
-    FontFamily monoFamily(L"Consolas");
+    EnsurePaintFonts(width);
+    FontFamily& family = *uiFontFamily_;
 
     REAL digitalSize = static_cast<REAL>(std::max(56, std::min(132, width / 10)));
-    Font digitalFont(&monoFamily, digitalSize, FontStyleRegular, UnitPixel);
-    Font dateFont(&family, static_cast<REAL>(std::max(20, std::min(34, width / 48))), FontStyleRegular, UnitPixel);
-    Font statusFont(&family, static_cast<REAL>(std::max(22, std::min(40, width / 42))), FontStyleRegular, UnitPixel);
-    Font remainFont(&monoFamily, static_cast<REAL>(std::max(48, std::min(96, width / 14))), FontStyleRegular, UnitPixel);
 
     RectF digitalRect(0, static_cast<REAL>(height * 0.52), static_cast<REAL>(width), digitalSize + 18);
     if (focusActive_) {
@@ -1264,25 +1348,23 @@ void FocusClockApp::Paint() {
             DrawFocusProgressBar(g, progressRect, theme);
         }
     }
-    DrawTextBlock(g, FormatTime(now), digitalRect, digitalFont, theme.primaryText, StringAlignmentCenter, StringAlignmentCenter);
+    DrawTextBlock(g, FormatTime(now), digitalRect, *digitalFont_, theme.primaryText, StringAlignmentCenter, StringAlignmentCenter);
 
     RectF dateRect(0, digitalRect.Y + digitalRect.Height + 4, static_cast<REAL>(width), 48);
-    DrawTextBlock(g, FormatDate(now), dateRect, dateFont, theme.secondaryText, StringAlignmentCenter, StringAlignmentCenter);
+    DrawTextBlock(g, FormatDate(now), dateRect, *dateFont_, theme.secondaryText, StringAlignmentCenter, StringAlignmentCenter);
 
     if (focusActive_) {
         RectF remainRect(0, dateRect.Y + 56, static_cast<REAL>(width), 92);
-        DrawTextBlock(g, FormatRemaining(), remainRect, remainFont, theme.accent, StringAlignmentCenter, StringAlignmentCenter);
+        DrawTextBlock(g, FormatRemaining(), remainRect, *remainFont_, theme.accent, StringAlignmentCenter, StringAlignmentCenter);
 
         RectF statusRect(0, remainRect.Y + remainRect.Height + 8, static_cast<REAL>(width), 52);
-        DrawTextBlock(g, L"专注进行中", statusRect, statusFont, theme.secondaryText, StringAlignmentCenter, StringAlignmentCenter);
+        DrawTextBlock(g, L"专注进行中", statusRect, *statusFont_, theme.secondaryText, StringAlignmentCenter, StringAlignmentCenter);
 
-        Font hintFont(&family, 18, FontStyleRegular, UnitPixel);
         RectF hintRect(0, static_cast<REAL>(height - 70), static_cast<REAL>(width), 28);
-        DrawTextBlock(g, L"专注结束前会保持全屏和置顶", hintRect, hintFont, theme.mutedText, StringAlignmentCenter, StringAlignmentCenter);
+        DrawTextBlock(g, L"专注结束前会保持全屏和置顶", hintRect, *focusHintFont_, theme.mutedText, StringAlignmentCenter, StringAlignmentCenter);
     } else {
-        Font hintFont(&family, 20, FontStyleRegular, UnitPixel);
         RectF hintRect(0, dateRect.Y + 58, static_cast<REAL>(width), 34);
-        DrawTextBlock(g, L"选择时长后开始", hintRect, hintFont, theme.mutedText, StringAlignmentCenter, StringAlignmentCenter);
+        DrawTextBlock(g, L"选择时长后开始", hintRect, *idleHintFont_, theme.mutedText, StringAlignmentCenter, StringAlignmentCenter);
     }
 
     auto appButton = std::find_if(buttons_.begin(), buttons_.end(), [](const UiButton& button) {
@@ -1489,7 +1571,7 @@ void FocusClockApp::DrawPanel(Graphics& g, const RECT& rc) {
     g.FillPath(&panelBrush, &path);
     g.DrawPath(&borderPen, &path);
 
-    FontFamily family(L"Segoe UI");
+    FontFamily& family = *uiFontFamily_;
     Font titleFont(&family, 26, FontStyleRegular, UnitPixel);
     Font hintFont(&family, 15, FontStyleRegular, UnitPixel);
     RectF titleRect(panel.X + 32.0f, panel.Y + 24.0f, panel.Width - 112.0f, 34.0f);
@@ -1655,15 +1737,15 @@ void FocusClockApp::DrawWhitelistTab(Graphics& g, const RectF& contentRect, cons
     std::wstring message = whitelistMessage_.empty()
         ? (L"当前 " + std::to_wstring(whitelistEntries_.size()) + L" 个白名单程序。")
         : whitelistMessage_;
-    DrawTextBlock(g, message, RectF(contentRect.X, contentRect.Y + 108.0f + y, contentRect.Width, 26.0f), helpFont, messageColor, StringAlignmentNear, StringAlignmentCenter);
+    DrawTextBlock(g, message, RectF(contentRect.X, contentRect.Y + 158.0f + y, contentRect.Width, 26.0f), helpFont, messageColor, StringAlignmentNear, StringAlignmentCenter);
 
-    DrawTextBlock(g, L"已添加程序", RectF(contentRect.X, contentRect.Y + 144.0f + y, contentRect.Width, 28.0f), bodyFont, theme.primaryText, StringAlignmentNear, StringAlignmentCenter);
+    DrawTextBlock(g, L"已添加程序", RectF(contentRect.X, contentRect.Y + 198.0f + y, contentRect.Width, 28.0f), bodyFont, theme.primaryText, StringAlignmentNear, StringAlignmentCenter);
     if (whitelistEntries_.empty()) {
-        DrawTextBlock(g, L"暂无白名单程序。", RectF(contentRect.X, contentRect.Y + 184.0f + y, contentRect.Width, 28.0f), helpFont, theme.mutedText, StringAlignmentNear, StringAlignmentCenter);
+        DrawTextBlock(g, L"暂无白名单程序。", RectF(contentRect.X, contentRect.Y + 238.0f + y, contentRect.Width, 28.0f), helpFont, theme.mutedText, StringAlignmentNear, StringAlignmentCenter);
         return;
     }
 
-    int listTop = static_cast<int>(contentRect.Y + 190.0f + y);
+    int listTop = static_cast<int>(contentRect.Y + 244.0f + y);
     int rowHeight = 36;
     RECT viewport = PanelContentViewport();
     int count = static_cast<int>(whitelistEntries_.size());
@@ -1768,7 +1850,7 @@ void FocusClockApp::DrawButton(Graphics& g, const UiButton& button) {
         return;
     }
 
-    FontFamily family(L"Segoe UI");
+    FontFamily& family = *uiFontFamily_;
     int buttonHeight = static_cast<int>(button.rect.bottom - button.rect.top);
     REAL fontSize = static_cast<REAL>(std::max(18, std::min(24, buttonHeight / 3)));
     if (button.id >= kScheduleDeleteButtonBaseId && button.id < kScheduleDeleteButtonLimit) {
@@ -1781,8 +1863,7 @@ void FocusClockApp::DrawButton(Graphics& g, const UiButton& button) {
 }
 
 void FocusClockApp::DrawButtonIcon(Graphics& g, const UiButton& button, const RectF& bounds) {
-    HICON icon = LoadIconForPath(button.iconPath);
-    if (!icon) {
+    if (!button.icon) {
         return;
     }
 
@@ -1793,9 +1874,8 @@ void FocusClockApp::DrawButtonIcon(Graphics& g, const UiButton& button, const Re
 
     g.Flush();
     HDC hdc = g.GetHDC();
-    DrawIconEx(hdc, x, y, icon, iconSize, iconSize, 0, nullptr, DI_NORMAL);
+    DrawIconEx(hdc, x, y, button.icon, iconSize, iconSize, 0, nullptr, DI_NORMAL);
     g.ReleaseHDC(hdc);
-    DestroyIcon(icon);
 }
 
 void FocusClockApp::HitTestAndClick(POINT pt) {
@@ -1973,6 +2053,7 @@ void FocusClockApp::RebuildWhitelistLayoutOnly() {
         app.rect = RECT{ left, top, left + appButtonSize, top + appButtonSize };
         app.label = whitelistEntries_[i].label;
         app.iconPath = whitelistEntries_[i].iconPath;
+        app.icon = whitelistEntries_[i].icon;
         app.id = kWhitelistButtonBaseId + i;
         app.primary = focusActive_;
         app.iconOnly = true;
@@ -2267,6 +2348,8 @@ void FocusClockApp::HandlePanelCommand(int id) {
         CreateRerunStartupTask();
     } else if (id == kWhitelistAddFileId) {
         AddWhitelistFromFileDialog();
+    } else if (id == kWhitelistAddFolderId) {
+        AddWhitelistFromFolderDialog();
     } else if (id == kWhitelistAddProcessId) {
         AddWhitelistFromRunningProcess();
     } else if (id >= kWhitelistDeleteButtonBaseId && id < kWhitelistDeleteButtonLimit) {
@@ -2409,7 +2492,7 @@ int FocusClockApp::WhitelistContentMaxScroll() const {
     }
 
     int viewportHeight = std::max(1, static_cast<int>(panelBounds_.bottom - panelBounds_.top - 126));
-    int contentHeight = 220 + static_cast<int>(whitelistEntries_.size()) * 36;
+    int contentHeight = 274 + static_cast<int>(whitelistEntries_.size()) * 36;
     return std::max(0, contentHeight - viewportHeight);
 }
 
@@ -2533,46 +2616,9 @@ void FocusClockApp::CreateRerunStartupTask() {
         taskRun +
         L"\" /F";
 
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
-    startup.dwFlags = STARTF_USESHOWWINDOW;
-    startup.wShowWindow = SW_HIDE;
-
-    PROCESS_INFORMATION process{};
-    std::vector<wchar_t> commandBuffer(command.begin(), command.end());
-    commandBuffer.push_back(L'\0');
-
-    BOOL created = CreateProcessW(
-        nullptr,
-        commandBuffer.data(),
-        nullptr,
-        nullptr,
-        FALSE,
-        CREATE_NO_WINDOW,
-        nullptr,
-        nullptr,
-        &startup,
-        &process);
-
-    if (!created) {
-        rerunTaskMessage_ = L"创建计划任务失败，请确认系统允许当前用户使用任务计划程序。";
-        rerunTaskMessageIsError_ = true;
-    } else {
-        WaitForSingleObject(process.hProcess, 10000);
-        DWORD exitCode = 1;
-        GetExitCodeProcess(process.hProcess, &exitCode);
-        CloseHandle(process.hThread);
-        CloseHandle(process.hProcess);
-
-        if (exitCode == 0) {
-            rerunTaskMessage_ = L"已添加计划任务：FocusClock Rerun。下次登录时会用 -rerun 参数检查是否需要恢复专注。";
-            rerunTaskMessageIsError_ = false;
-        } else {
-            rerunTaskMessage_ = L"计划任务命令执行失败，可以尝试以普通用户重新运行程序后再添加。";
-            rerunTaskMessageIsError_ = true;
-        }
-    }
-
+    rerunTaskMessage_ = L"状态：正在添加...";
+    rerunTaskMessageIsError_ = false;
+    RunRerunTaskCommandAsync(command, kRerunTaskCreateCommand, 10000);
     RebuildLayout();
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
@@ -2580,50 +2626,105 @@ void FocusClockApp::CreateRerunStartupTask() {
 void FocusClockApp::CheckRerunStartupTaskStatus() {
     std::wstring command = L"\"C:\\Windows\\System32\\schtasks.exe\" /Query /TN \"FocusClock Rerun\"";
 
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
-    startup.dwFlags = STARTF_USESHOWWINDOW;
-    startup.wShowWindow = SW_HIDE;
+    rerunTaskMessage_ = L"状态：正在检查...";
+    rerunTaskMessageIsError_ = false;
+    RunRerunTaskCommandAsync(command, kRerunTaskStatusCommand, 5000);
+    RebuildLayout();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
 
-    PROCESS_INFORMATION process{};
-    std::vector<wchar_t> commandBuffer(command.begin(), command.end());
-    commandBuffer.push_back(L'\0');
+void FocusClockApp::RunRerunTaskCommandAsync(std::wstring command, WPARAM commandKind, DWORD timeoutMs) {
+    HWND target = hwnd_;
+    std::thread([command = std::move(command), target, commandKind, timeoutMs]() mutable {
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        startup.dwFlags = STARTF_USESHOWWINDOW;
+        startup.wShowWindow = SW_HIDE;
 
-    BOOL created = CreateProcessW(
-        nullptr,
-        commandBuffer.data(),
-        nullptr,
-        nullptr,
-        FALSE,
-        CREATE_NO_WINDOW,
-        nullptr,
-        nullptr,
-        &startup,
-        &process);
+        PROCESS_INFORMATION process{};
+        std::vector<wchar_t> commandBuffer(command.begin(), command.end());
+        commandBuffer.push_back(L'\0');
 
-    if (!created) {
-        rerunTaskMessage_ = L"状态：无法检查计划任务";
-        rerunTaskMessageIsError_ = true;
-        return;
+        BOOL created = CreateProcessW(
+            nullptr,
+            commandBuffer.data(),
+            nullptr,
+            nullptr,
+            FALSE,
+            CREATE_NO_WINDOW,
+            nullptr,
+            nullptr,
+            &startup,
+            &process);
+
+        DWORD result = kRerunTaskLaunchFailed;
+        if (created) {
+            DWORD waitResult = WaitForSingleObject(process.hProcess, timeoutMs);
+            if (waitResult == WAIT_OBJECT_0) {
+                DWORD exitCode = 1;
+                if (GetExitCodeProcess(process.hProcess, &exitCode)) {
+                    result = exitCode;
+                }
+            } else if (waitResult == WAIT_TIMEOUT) {
+                TerminateProcess(process.hProcess, 1);
+                result = kRerunTaskTimedOut;
+            }
+
+            CloseHandle(process.hThread);
+            CloseHandle(process.hProcess);
+        }
+
+        PostMessageW(target, kRerunTaskCommandFinishedMessage, commandKind, static_cast<LPARAM>(result));
+    }).detach();
+}
+
+void FocusClockApp::HandleRerunTaskCommandResult(WPARAM commandKind, LPARAM result) {
+    DWORD exitCode = static_cast<DWORD>(result);
+    if (commandKind == kRerunTaskCreateCommand) {
+        if (exitCode == 0) {
+            rerunTaskMessage_ = L"已添加计划任务：FocusClock Rerun。下次登录时会用 -rerun 参数检查是否需要恢复专注。";
+            rerunTaskMessageIsError_ = false;
+        } else if (exitCode == kRerunTaskTimedOut) {
+            rerunTaskMessage_ = L"创建计划任务超时，请稍后重试。";
+            rerunTaskMessageIsError_ = true;
+        } else if (exitCode == kRerunTaskLaunchFailed) {
+            rerunTaskMessage_ = L"创建计划任务失败，请确认系统允许当前用户使用任务计划程序。";
+            rerunTaskMessageIsError_ = true;
+        } else {
+            rerunTaskMessage_ = L"计划任务命令执行失败，可以尝试以普通用户重新运行程序后再添加。";
+            rerunTaskMessageIsError_ = true;
+        }
+    } else if (commandKind == kRerunTaskStatusCommand) {
+        if (exitCode == 0) {
+            rerunTaskMessage_ = L"状态：已添加";
+            rerunTaskMessageIsError_ = false;
+        } else if (exitCode == kRerunTaskTimedOut) {
+            rerunTaskMessage_ = L"状态：检查超时";
+            rerunTaskMessageIsError_ = true;
+        } else if (exitCode == kRerunTaskLaunchFailed) {
+            rerunTaskMessage_ = L"状态：无法检查计划任务";
+            rerunTaskMessageIsError_ = true;
+        } else {
+            rerunTaskMessage_ = L"状态：未添加";
+            rerunTaskMessageIsError_ = false;
+        }
     }
 
-    WaitForSingleObject(process.hProcess, 5000);
-    DWORD exitCode = 1;
-    GetExitCodeProcess(process.hProcess, &exitCode);
-    CloseHandle(process.hThread);
-    CloseHandle(process.hProcess);
-
-    if (exitCode == 0) {
-        rerunTaskMessage_ = L"状态：已添加";
-        rerunTaskMessageIsError_ = false;
-    } else {
-        rerunTaskMessage_ = L"状态：未添加";
-        rerunTaskMessageIsError_ = false;
-    }
+    RebuildLayout();
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 std::wstring FocusClockApp::GetWhitelistPath() const {
     return GetExecutableDirectory() + L"\\Whitelist.txt";
+}
+
+void FocusClockApp::DestroyWhitelistIconCache() {
+    for (auto& entry : whitelistEntries_) {
+        if (entry.icon) {
+            DestroyIcon(entry.icon);
+            entry.icon = nullptr;
+        }
+    }
 }
 
 bool FocusClockApp::SaveWhitelistEntries(const std::vector<std::wstring>& launchSpecs) {
@@ -2644,11 +2745,11 @@ bool FocusClockApp::SaveWhitelistEntries(const std::vector<std::wstring>& launch
     }
 
     std::vector<char> bytes;
-    bytes.reserve(static_cast<size_t>(byteCount) + 3);
-    bytes.push_back(static_cast<char>(0xEF));
-    bytes.push_back(static_cast<char>(0xBB));
-    bytes.push_back(static_cast<char>(0xBF));
+    bytes.reserve(text.empty() ? 0 : static_cast<size_t>(byteCount) + 3);
     if (byteCount > 0) {
+        bytes.push_back(static_cast<char>(0xEF));
+        bytes.push_back(static_cast<char>(0xBB));
+        bytes.push_back(static_cast<char>(0xBF));
         size_t offset = bytes.size();
         bytes.resize(offset + static_cast<size_t>(byteCount));
         int writtenText = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), bytes.data() + offset, byteCount, nullptr, nullptr);
@@ -2711,6 +2812,67 @@ void FocusClockApp::AddWhitelistPath(const std::wstring& path) {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
+void FocusClockApp::AddWhitelistFolder(const std::wstring& folder) {
+    std::wstring trimmed = Trim(folder);
+    if (trimmed.empty()) {
+        return;
+    }
+
+    DWORD attributes = GetFileAttributesW(trimmed.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        whitelistMessage_ = L"添加失败：文件夹不可用。";
+        whitelistMessageIsError_ = true;
+        RebuildLayout();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+
+    std::vector<std::wstring> executablePaths = EnumerateExecutableFilesInDirectory(trimmed);
+    if (executablePaths.empty()) {
+        whitelistMessage_ = L"添加失败：该文件夹下没有找到 .exe 程序。";
+        whitelistMessageIsError_ = true;
+        RebuildLayout();
+        InvalidateRect(hwnd_, nullptr, FALSE);
+        return;
+    }
+
+    std::vector<std::wstring> specs;
+    specs.reserve(whitelistEntries_.size() + executablePaths.size());
+    std::map<std::wstring, bool> seen;
+    for (const auto& entry : whitelistEntries_) {
+        specs.push_back(entry.launchSpec);
+        seen[entry.normalized] = true;
+        seen[ToLower(entry.iconPath)] = true;
+    }
+
+    int added = 0;
+    for (const auto& path : executablePaths) {
+        std::wstring normalized = ToLower(path);
+        if (seen.find(normalized) != seen.end()) {
+            continue;
+        }
+
+        specs.push_back(path);
+        seen[normalized] = true;
+        ++added;
+    }
+
+    if (added == 0) {
+        whitelistMessage_ = L"添加失败：文件夹内程序已在白名单中。";
+        whitelistMessageIsError_ = true;
+    } else if (SaveWhitelistEntries(specs)) {
+        LoadWhitelistIfNeeded(true);
+        whitelistMessage_ = L"已从文件夹添加 " + std::to_wstring(added) + L" 个程序。";
+        whitelistMessageIsError_ = false;
+    } else {
+        whitelistMessage_ = L"添加失败：无法写入 Whitelist.txt。";
+        whitelistMessageIsError_ = true;
+    }
+
+    RebuildLayout();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
 void FocusClockApp::AddWhitelistFromFileDialog() {
     wchar_t path[32768]{};
     OPENFILENAMEW ofn{};
@@ -2725,6 +2887,82 @@ void FocusClockApp::AddWhitelistFromFileDialog() {
     if (GetOpenFileNameW(&ofn)) {
         AddWhitelistPath(path);
     }
+}
+
+void FocusClockApp::AddWhitelistFromFolderDialog() {
+    HRESULT oleResult = OleInitialize(nullptr);
+    bool shouldUninitializeOle = SUCCEEDED(oleResult);
+
+    BROWSEINFOW browse{};
+    browse.hwndOwner = hwnd_;
+    browse.lpszTitle = L"选择要自动加入白名单的文件夹";
+    browse.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE | BIF_NONEWFOLDERBUTTON;
+
+    PIDLIST_ABSOLUTE pidl = SHBrowseForFolderW(&browse);
+    if (!pidl) {
+        if (shouldUninitializeOle) {
+            OleUninitialize();
+        }
+        return;
+    }
+
+    wchar_t folder[MAX_PATH]{};
+    bool ok = SHGetPathFromIDListW(pidl, folder) != FALSE;
+    CoTaskMemFree(pidl);
+    if (shouldUninitializeOle) {
+        OleUninitialize();
+    }
+
+    if (ok) {
+        AddWhitelistFolder(folder);
+    }
+}
+
+std::vector<std::wstring> FocusClockApp::EnumerateExecutableFilesInDirectory(const std::wstring& folder) const {
+    std::vector<std::wstring> executablePaths;
+    std::vector<std::wstring> pending{ folder };
+    std::map<std::wstring, bool> visitedDirectories;
+
+    while (!pending.empty()) {
+        std::wstring current = pending.back();
+        pending.pop_back();
+
+        std::wstring normalizedDirectory = ToLower(current);
+        if (visitedDirectories.find(normalizedDirectory) != visitedDirectories.end()) {
+            continue;
+        }
+        visitedDirectories[normalizedDirectory] = true;
+
+        WIN32_FIND_DATAW data{};
+        std::wstring searchPattern = JoinPath(current, L"*");
+        HANDLE find = FindFirstFileW(searchPattern.c_str(), &data);
+        if (find == INVALID_HANDLE_VALUE) {
+            continue;
+        }
+
+        do {
+            std::wstring name = data.cFileName;
+            if (name == L"." || name == L"..") {
+                continue;
+            }
+
+            std::wstring path = JoinPath(current, name);
+            if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                if ((data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+                    pending.push_back(path);
+                }
+            } else if (IsExecutableFileName(name)) {
+                executablePaths.push_back(path);
+            }
+        } while (FindNextFileW(find, &data));
+
+        FindClose(find);
+    }
+
+    std::sort(executablePaths.begin(), executablePaths.end(), [](const std::wstring& left, const std::wstring& right) {
+        return ToLower(left) < ToLower(right);
+    });
+    return executablePaths;
 }
 
 std::vector<ProcessPathChoice> FocusClockApp::EnumerateRunningProcessPaths() const {
@@ -3233,6 +3471,23 @@ std::wstring FocusClockApp::BaseName(const std::wstring& path) {
     return path.substr(slash + 1);
 }
 
+bool FocusClockApp::IsExecutableFileName(const std::wstring& filename) {
+    std::wstring lower = ToLower(filename);
+    return lower.size() > 4 && lower.substr(lower.size() - 4) == L".exe";
+}
+
+std::wstring FocusClockApp::JoinPath(const std::wstring& directory, const std::wstring& name) {
+    if (directory.empty()) {
+        return name;
+    }
+
+    wchar_t last = directory.back();
+    if (last == L'\\' || last == L'/') {
+        return directory + name;
+    }
+    return directory + L"\\" + name;
+}
+
 std::wstring FocusClockApp::StripExtension(const std::wstring& filename) {
     size_t dot = filename.find_last_of(L'.');
     if (dot == std::wstring::npos || dot == 0) {
@@ -3334,6 +3589,9 @@ std::wstring FocusClockApp::DecodeTextFile(const std::vector<char>& bytes) {
         static_cast<unsigned char>(bytes[1]) == 0xBB &&
         static_cast<unsigned char>(bytes[2]) == 0xBF) {
         offset = 3;
+    }
+    if (offset >= static_cast<int>(bytes.size())) {
+        return L"";
     }
 
     int wideLength = MultiByteToWideChar(codePage, MB_ERR_INVALID_CHARS, bytes.data() + offset, static_cast<int>(bytes.size() - offset), nullptr, 0);

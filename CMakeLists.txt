@@ -24,6 +24,7 @@ target_link_libraries(FocusClock PRIVATE
     comdlg32
     gdiplus
     dwmapi
+    ole32
     shell32
 )
 
