@@ -26,6 +26,7 @@ target_link_libraries(FocusClock PRIVATE
     dwmapi
     ole32
     shell32
+    winhttp
 )
 
 add_custom_target(CopyWhitelist ALL
