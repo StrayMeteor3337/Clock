@@ -203,7 +203,11 @@ LRESULT FocusClockApp::HandleMessage(HWND hwnd, UINT msg, WPARAM wparam, LPARAM 
             CheckScheduledFocusTasks();
             if (focusActive_) {
                 TryResolvePendingWhitelistWindow();
-                if ((ShouldYieldToWhitelist() || IsWhitelistedForegroundWindow()) && IsTrackedWhitelistWindowValid()) {
+                bool foregroundWhitelisted = IsWhitelistedForegroundWindow();
+                if (HWND bottomWhitelistWindow = PromoteVisibleWhitelistedWindows()) {
+                    activeWhitelistWindow_ = bottomWhitelistWindow;
+                    EnterFullscreenBelow(activeWhitelistWindow_);
+                } else if (foregroundWhitelisted && IsTrackedWhitelistWindowValid()) {
                     EnterFullscreenBelow(activeWhitelistWindow_);
                 } else {
                     activeWhitelistWindow_ = nullptr;

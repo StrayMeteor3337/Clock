@@ -425,8 +425,9 @@ void FocusClockApp::DrawScheduleTab(Graphics& g, const RectF& contentRect, const
             continue;
         }
         const auto& task = scheduledTasks_[i];
+        int duration = ScheduleDurationMinutes(task.startMinute, task.endMinute);
         std::wstring line = FormatMinuteOfDay(task.startMinute) + L" - " + FormatMinuteOfDay(task.endMinute) +
-            L"  (" + std::to_wstring(task.endMinute - task.startMinute) + L" 分钟)";
+            L"  (" + std::to_wstring(duration) + L" 分钟)";
         DrawTextBlock(g, line, RectF(contentRect.X, static_cast<REAL>(rowTop), contentRect.Width - 90.0f, 26.0f), rowFont, theme.secondaryText, StringAlignmentNear, StringAlignmentCenter);
     }
 

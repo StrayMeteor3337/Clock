@@ -444,16 +444,18 @@ void FocusClockApp::OpenWhitelistEntry(size_t index) {
     }
 
     const WhitelistEntry& entry = whitelistEntries_[index];
-    pendingWhitelistIndex_ = static_cast<int>(index);
     whitelistYieldUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(12);
+    pendingWhitelistIndex_ = focusActive_ ? -1 : static_cast<int>(index);
 
-    HWND running = FindRunningWhitelistWindow(entry);
-    if (running) {
-        pendingWhitelistIndex_ = -1;
-        activeWhitelistWindow_ = running;
-        BringWindowToFront(running);
-        EnterFullscreenBelow(running);
-        return;
+    if (!focusActive_) {
+        HWND running = FindRunningWhitelistWindow(entry);
+        if (running) {
+            pendingWhitelistIndex_ = -1;
+            activeWhitelistWindow_ = running;
+            BringWindowToFront(running);
+            EnterFullscreenBelow(running);
+            return;
+        }
     }
 
     HINSTANCE result = ShellExecuteW(hwnd_, L"open", entry.launchSpec.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
@@ -479,7 +481,7 @@ void FocusClockApp::BringWindowToFront(HWND target) {
         return;
     }
 
-    PromoteWhitelistWindow(target);
+    PromoteWhitelistWindow(target, true);
 
     if (IsIconic(target)) {
         ShowWindow(target, SW_RESTORE);
@@ -491,18 +493,42 @@ void FocusClockApp::BringWindowToFront(HWND target) {
     SetForegroundWindow(target);
 }
 
-void FocusClockApp::PromoteWhitelistWindow(HWND target) {
+void FocusClockApp::PromoteWhitelistWindow(HWND target, bool reorderExisting) {
     if (!target) {
         return;
     }
 
-    if (promotedWindows_.find(target) == promotedWindows_.end()) {
+    bool newlyPromoted = promotedWindows_.find(target) == promotedWindows_.end();
+    if (newlyPromoted) {
         promotedWindows_[target] = GetWindowLongPtrW(target, GWL_EXSTYLE);
     }
 
     LONG_PTR exStyle = GetWindowLongPtrW(target, GWL_EXSTYLE);
     SetWindowLongPtrW(target, GWL_EXSTYLE, exStyle | WS_EX_TOPMOST);
-    SetWindowPos(target, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    if (newlyPromoted || reorderExisting) {
+        SetWindowPos(target, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    } else {
+        SetWindowPos(target, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED);
+    }
+}
+
+HWND FocusClockApp::PromoteVisibleWhitelistedWindows() {
+    std::vector<HWND> windows;
+    WhitelistedWindowListContext context{};
+    context.app = this;
+    context.windows = &windows;
+    EnumWindows(EnumVisibleWhitelistedWindows, reinterpret_cast<LPARAM>(&context));
+
+    bool hasNewWindow = std::any_of(windows.begin(), windows.end(), [this](HWND window) {
+        return promotedWindows_.find(window) == promotedWindows_.end();
+    });
+
+    if (hasNewWindow) {
+        for (auto it = windows.rbegin(); it != windows.rend(); ++it) {
+            PromoteWhitelistWindow(*it, true);
+        }
+    }
+    return windows.empty() ? nullptr : windows.back();
 }
 
 void FocusClockApp::RestorePromotedWhitelistWindows() {
@@ -616,6 +642,25 @@ BOOL CALLBACK FocusClockApp::EnumWhitelistWindows(HWND window, LPARAM param) {
         return FALSE;
     }
 
+    return TRUE;
+}
+
+BOOL CALLBACK FocusClockApp::EnumVisibleWhitelistedWindows(HWND window, LPARAM param) {
+    auto* context = reinterpret_cast<WhitelistedWindowListContext*>(param);
+    if (!context || !context->app || !context->windows || !window || window == context->app->hwnd_) {
+        return TRUE;
+    }
+
+    if (!IsWindowVisible(window) || IsIconic(window) || GetWindow(window, GW_OWNER)) {
+        return TRUE;
+    }
+
+    std::wstring path = context->app->GetProcessImagePath(window);
+    if (path.empty() || !context->app->IsExecutableWhitelisted(path)) {
+        return TRUE;
+    }
+
+    context->windows->push_back(window);
     return TRUE;
 }
 

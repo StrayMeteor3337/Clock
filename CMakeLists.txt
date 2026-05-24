@@ -48,6 +48,7 @@ target_link_libraries(FocusClock PRIVATE
     ole32
     shell32
     winhttp
+    advapi32
 )
 
 add_custom_target(CopyWhitelist ALL

@@ -171,6 +171,7 @@ struct ReleaseInfo {
     std::wstring publishedAt;
     std::wstring browserDownloadUrl;
     std::wstring assetName;
+    std::wstring assetDigest;
     long long publishedUnix = 0;
 };
 
@@ -204,6 +205,11 @@ struct FindWindowContext {
     const FocusClockApp* app = nullptr;
     const WhitelistEntry* entry = nullptr;
     HWND found = nullptr;
+};
+
+struct WhitelistedWindowListContext {
+    const FocusClockApp* app = nullptr;
+    std::vector<HWND>* windows = nullptr;
 };
 
 class FocusClockApp {
@@ -323,7 +329,8 @@ private:
     void OpenWhitelistEntry(size_t index);
     HWND FindRunningWhitelistWindow(const WhitelistEntry& entry) const;
     void BringWindowToFront(HWND target);
-    void PromoteWhitelistWindow(HWND target);
+    void PromoteWhitelistWindow(HWND target, bool reorderExisting = false);
+    HWND PromoteVisibleWhitelistedWindows();
     void RestorePromotedWhitelistWindows();
     void RestoreWhitelistWindow(HWND target, LONG_PTR savedStyle);
     bool IsTrackedWhitelistWindowValid() const;
@@ -360,6 +367,7 @@ private:
     static std::wstring QuotePowerShellString(const std::wstring& value);
     static std::wstring SanitizeFileName(std::wstring value);
     static BOOL CALLBACK EnumWhitelistWindows(HWND window, LPARAM param);
+    static BOOL CALLBACK EnumVisibleWhitelistedWindows(HWND window, LPARAM param);
     static BOOL CALLBACK EnumWhitelistedWindowsForRestore(HWND window, LPARAM param);
 
     HWND hwnd_ = nullptr;
@@ -409,6 +417,7 @@ private:
     std::wstring updateMessage_ = L"正在获取版本信息...";
     std::wstring updateDownloadUrl_;
     std::wstring updateAssetName_ = L"FocusClock.exe";
+    std::wstring updateAssetDigest_;
     bool updateCheckStarted_ = false;
     bool updateCheckInProgress_ = false;
     bool updateAvailable_ = false;

@@ -1,6 +1,147 @@
 #include "FocusClockApp.h"
+#include <wincrypt.h>
 
 namespace focus_clock {
+
+namespace {
+
+std::wstring TrimDigestText(std::wstring value) {
+    size_t first = 0;
+    while (first < value.size() && std::iswspace(value[first])) {
+        ++first;
+    }
+
+    size_t last = value.size();
+    while (last > first && std::iswspace(value[last - 1])) {
+        --last;
+    }
+
+    return value.substr(first, last - first);
+}
+
+std::wstring NormalizeSha256Digest(std::wstring value) {
+    value = TrimDigestText(std::move(value));
+    constexpr const wchar_t* prefix = L"sha256:";
+    if (value.size() > 7 && _wcsnicmp(value.c_str(), prefix, 7) == 0) {
+        value.erase(0, 7);
+    }
+
+    std::wstring normalized;
+    normalized.reserve(value.size());
+    for (wchar_t ch : value) {
+        if (std::iswspace(ch)) {
+            continue;
+        }
+        normalized.push_back(static_cast<wchar_t>(std::towlower(ch)));
+    }
+    return normalized;
+}
+
+bool IsHexDigest(const std::wstring& value, size_t expectedLength) {
+    if (value.size() != expectedLength) {
+        return false;
+    }
+
+    return std::all_of(value.begin(), value.end(), [](wchar_t ch) {
+        return (ch >= L'0' && ch <= L'9') ||
+            (ch >= L'a' && ch <= L'f') ||
+            (ch >= L'A' && ch <= L'F');
+    });
+}
+
+std::wstring BytesToLowerHex(const BYTE* bytes, DWORD size) {
+    static constexpr wchar_t kHex[] = L"0123456789abcdef";
+    std::wstring hex;
+    hex.reserve(static_cast<size_t>(size) * 2);
+    for (DWORD i = 0; i < size; ++i) {
+        hex.push_back(kHex[(bytes[i] >> 4) & 0x0F]);
+        hex.push_back(kHex[bytes[i] & 0x0F]);
+    }
+    return hex;
+}
+
+bool ComputeFileSha256(const std::wstring& path, std::wstring& digest) {
+    digest.clear();
+
+    HANDLE file = CreateFileW(
+        path.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    HCRYPTPROV provider = 0;
+    HCRYPTHASH hash = 0;
+    bool ok = CryptAcquireContextW(&provider, nullptr, nullptr, PROV_RSA_AES, CRYPT_VERIFYCONTEXT) != FALSE;
+    if (ok) {
+        ok = CryptCreateHash(provider, CALG_SHA_256, 0, 0, &hash) != FALSE;
+    }
+
+    std::array<BYTE, 64 * 1024> buffer{};
+    while (ok) {
+        DWORD read = 0;
+        if (!ReadFile(file, buffer.data(), static_cast<DWORD>(buffer.size()), &read, nullptr)) {
+            ok = false;
+            break;
+        }
+        if (read == 0) {
+            break;
+        }
+        ok = CryptHashData(hash, buffer.data(), read, 0) != FALSE;
+    }
+
+    if (ok) {
+        DWORD hashSize = 32;
+        std::array<BYTE, 32> hashBytes{};
+        ok = CryptGetHashParam(hash, HP_HASHVAL, hashBytes.data(), &hashSize, 0) != FALSE && hashSize == hashBytes.size();
+        if (ok) {
+            digest = BytesToLowerHex(hashBytes.data(), hashSize);
+        }
+    }
+
+    if (hash) {
+        CryptDestroyHash(hash);
+    }
+    if (provider) {
+        CryptReleaseContext(provider, 0);
+    }
+    CloseHandle(file);
+    return ok;
+}
+
+bool VerifyDownloadedAsset(const std::wstring& path, const std::wstring& expectedDigest, std::wstring& actualDigest) {
+    actualDigest.clear();
+    std::wstring normalizedExpected = NormalizeSha256Digest(expectedDigest);
+    if (!IsHexDigest(normalizedExpected, 64)) {
+        return false;
+    }
+    if (!ComputeFileSha256(path, actualDigest)) {
+        return false;
+    }
+    return NormalizeSha256Digest(actualDigest) == normalizedExpected;
+}
+
+constexpr std::array<UpdateSource, 5> kTrustedUpdateSources{ {
+    { 1, L"gh-proxy.org", L"https://gh-proxy.org/" },
+    { 2, L"GitHub", L"" },
+    { 3, L"v4.gh-proxy.org", L"https://v4.gh-proxy.org/" },
+    { 4, L"v6.gh-proxy.org", L"https://v6.gh-proxy.org/" },
+    { 5, L"cdn.gh-proxy.org", L"https://cdn.gh-proxy.org/" }
+} };
+
+bool IsUsableRelease(const UpdateSourceProbe& probe) {
+    return probe.response.ok &&
+        probe.release.ok &&
+        !probe.release.browserDownloadUrl.empty() &&
+        IsHexDigest(NormalizeSha256Digest(probe.release.assetDigest), 64);
+}
+
+} // namespace
 
 void FocusClockApp::StartUpdateCheck(bool force) {
     if (updateCheckInProgress_ || (!force && updateCheckStarted_)) {
@@ -12,6 +153,7 @@ void FocusClockApp::StartUpdateCheck(bool force) {
     updateAvailable_ = false;
     updateDownloadUrl_.clear();
     updateAssetName_ = L"FocusClock.exe";
+    updateAssetDigest_.clear();
     updateMessage_ = L"正在获取版本信息...";
     updateMessageIsError_ = false;
     RebuildLayout();
@@ -19,7 +161,36 @@ void FocusClockApp::StartUpdateCheck(bool force) {
 
     HWND target = hwnd_;
     std::thread([target]() {
-        ReleaseInfo* release = new ReleaseInfo(ParseReleaseInfo(HttpGetText(kLatestReleaseUrl, kUpdateApiTimeoutMs).body));
+        std::vector<std::future<UpdateSourceProbe>> probes;
+        probes.reserve(kTrustedUpdateSources.size());
+        for (const auto& source : kTrustedUpdateSources) {
+            probes.push_back(std::async(std::launch::async, [source]() {
+                UpdateSourceProbe probe{};
+                probe.source = source;
+                std::wstring apiUrl = std::wstring(source.prefix) + kLatestReleaseUrl;
+                probe.response = HttpGetText(apiUrl, kUpdateApiTimeoutMs);
+                if (probe.response.ok) {
+                    probe.release = ParseReleaseInfo(probe.response.body);
+                }
+                return probe;
+            }));
+        }
+
+        DWORD fastestMs = std::numeric_limits<DWORD>::max();
+        ReleaseInfo selectedRelease{};
+        for (auto& probeFuture : probes) {
+            UpdateSourceProbe probe = probeFuture.get();
+            if (!IsUsableRelease(probe)) {
+                continue;
+            }
+
+            if (probe.response.elapsedMs < fastestMs) {
+                fastestMs = probe.response.elapsedMs;
+                selectedRelease = std::move(probe.release);
+            }
+        }
+
+        ReleaseInfo* release = new ReleaseInfo(std::move(selectedRelease));
         PostMessageW(target, kUpdateCheckFinishedMessage, 0, reinterpret_cast<LPARAM>(release));
     }).detach();
 }
@@ -31,18 +202,39 @@ void FocusClockApp::HandleUpdateCheckResult(ReleaseInfo* release) {
     updateDownloadUrl_.clear();
 
     if (!result || !result->ok) {
-        updateMessage_ = L"版本获取失败，请检查网络";
+        updateMessage_ = L"版本获取失败，请检查更新源或发布资产校验信息";
         updateMessageIsError_ = true;
     } else {
-        FILETIME nowFileTime{};
-        GetSystemTimeAsFileTime(&nowFileTime);
-        long long nowUnix = FileTimeToUnixSeconds(nowFileTime);
-        if (result->publishedUnix > nowUnix) {
-            updateAvailable_ = true;
-            updateDownloadUrl_ = result->browserDownloadUrl;
-            updateAssetName_ = result->assetName.empty() ? L"FocusClock.exe" : result->assetName;
-            updateMessage_ = result->body.empty() ? L"发现新版本" : result->body;
-            updateMessageIsError_ = false;
+        std::wstring executablePath(MAX_PATH, L'\0');
+        DWORD length = GetModuleFileNameW(nullptr, executablePath.data(), static_cast<DWORD>(executablePath.size()));
+        while (length == executablePath.size()) {
+            executablePath.resize(executablePath.size() * 2);
+            length = GetModuleFileNameW(nullptr, executablePath.data(), static_cast<DWORD>(executablePath.size()));
+        }
+
+        WIN32_FILE_ATTRIBUTE_DATA executableData{};
+        bool hasExecutableWriteTime = length > 0;
+        if (hasExecutableWriteTime) {
+            executablePath.resize(length);
+            hasExecutableWriteTime = GetFileAttributesExW(executablePath.c_str(), GetFileExInfoStandard, &executableData) != FALSE;
+        }
+
+        if (!hasExecutableWriteTime) {
+            updateMessage_ = L"版本检查失败：无法读取本地程序修改时间";
+            updateMessageIsError_ = true;
+        } else if (result->publishedUnix > FileTimeToUnixSeconds(executableData.ftLastWriteTime)) {
+            std::wstring normalizedDigest = NormalizeSha256Digest(result->assetDigest);
+            if (!IsHexDigest(normalizedDigest, 64)) {
+                updateMessage_ = L"发现新版本，但发布资产缺少 SHA-256 校验信息，已阻止自动更新";
+                updateMessageIsError_ = true;
+            } else {
+                updateAvailable_ = true;
+                updateDownloadUrl_ = result->browserDownloadUrl;
+                updateAssetName_ = result->assetName.empty() ? L"FocusClock.exe" : result->assetName;
+                updateAssetDigest_ = normalizedDigest;
+                updateMessage_ = result->body.empty() ? L"发现新版本" : result->body;
+                updateMessageIsError_ = false;
+            }
         } else {
             updateMessage_ = L"您已是最新版本";
             updateMessageIsError_ = false;
@@ -66,26 +258,28 @@ void FocusClockApp::StartUpdateDownload() {
 
     HWND target = hwnd_;
     std::wstring assetName = updateAssetName_;
+    std::wstring downloadUrl = updateDownloadUrl_;
+    std::wstring expectedDigest = updateAssetDigest_;
     std::wstring exeDirectory = GetExecutableDirectory();
-    std::thread([target, assetName = std::move(assetName), exeDirectory = std::move(exeDirectory)]() {
+    std::thread([target, assetName = std::move(assetName), downloadUrl = std::move(downloadUrl), expectedDigest = std::move(expectedDigest), exeDirectory = std::move(exeDirectory)]() {
         UpdateDownloadResult* result = new UpdateDownloadResult();
         auto postLog = [target](const std::wstring& message, bool isError = false) {
             PostMessageW(target, kUpdateLogMessage, isError ? 1 : 0, reinterpret_cast<LPARAM>(new std::wstring(message)));
         };
 
-        const std::array<UpdateSource, 5> sources{ {
-            { 1, L"gh-proxy.org", L"https://gh-proxy.org/" },
-            { 2, L"GitHub", L"" },
-            { 3, L"v4.gh-proxy.org", L"https://v4.gh-proxy.org/" },
-            { 4, L"v6.gh-proxy.org", L"https://v6.gh-proxy.org/" },
-            { 5, L"cdn.gh-proxy.org", L"https://cdn.gh-proxy.org/" }
-        } };
+        std::wstring normalizedExpectedDigest = NormalizeSha256Digest(expectedDigest);
+        if (!IsHexDigest(normalizedExpectedDigest, 64)) {
+            result->ok = false;
+            result->message = L"更新被取消：发布资产缺少 SHA-256 校验信息";
+            PostMessageW(target, kUpdateDownloadFinishedMessage, 0, reinterpret_cast<LPARAM>(result));
+            return;
+        }
 
         postLog(L"开始测速更新源...");
 
         std::vector<std::future<UpdateSourceProbe>> probes;
-        probes.reserve(sources.size());
-        for (const auto& source : sources) {
+        probes.reserve(kTrustedUpdateSources.size());
+        for (const auto& source : kTrustedUpdateSources) {
             probes.push_back(std::async(std::launch::async, [source]() {
                 UpdateSourceProbe probe{};
                 probe.source = source;
@@ -105,7 +299,7 @@ void FocusClockApp::StartUpdateDownload() {
 
         for (auto& probeFuture : probes) {
             UpdateSourceProbe probe = probeFuture.get();
-            if (!probe.response.ok || !probe.release.ok || probe.release.browserDownloadUrl.empty()) {
+            if (!IsUsableRelease(probe)) {
                 postLog(L"线路" + std::to_wstring(probe.source.order) + L"测速失败：" + probe.source.name);
                 continue;
             }
@@ -127,9 +321,9 @@ void FocusClockApp::StartUpdateDownload() {
             return;
         }
 
-        postLog(L"测速完成，选择线路1（gh-proxy.org）");
+        postLog(L"测速完成，选择线路" + std::to_wstring(fastestSource.order) + L"（" + fastestSource.name + L"）");
 
-        std::wstring selectedAssetName = fastestRelease.assetName.empty() ? assetName : fastestRelease.assetName;
+        std::wstring selectedAssetName = assetName;
         selectedAssetName = SanitizeFileName(selectedAssetName);
         if (selectedAssetName.empty()) {
             selectedAssetName = L"FocusClock.exe";
@@ -153,14 +347,15 @@ void FocusClockApp::StartUpdateDownload() {
         };
         addDownloadPrefix(L"https://gh-proxy.org/");
         addDownloadPrefix(fastestSource.prefix);
-        for (const auto& source : sources) {
+        for (const auto& source : kTrustedUpdateSources) {
             addDownloadPrefix(source.prefix);
         }
 
         bool downloaded = false;
+        std::wstring lastDigest;
         for (const auto& prefix : downloadPrefixes) {
             DeleteFileW(outputPath.c_str());
-            std::wstring selectedDownloadUrl = prefix + fastestRelease.browserDownloadUrl;
+            std::wstring selectedDownloadUrl = prefix + downloadUrl;
             std::wstring lineName = prefix.empty() ? L"GitHub" : (prefix == L"https://gh-proxy.org/" ? L"线路1" : prefix);
             postLog(L"开始下载：" + lineName);
             std::wstring curlCommand =
@@ -170,8 +365,15 @@ void FocusClockApp::StartUpdateDownload() {
 
             DWORD curlExitCode = 1;
             if (TryRunCommand(curlCommand, kUpdateDownloadTimeoutMs, curlExitCode) && curlExitCode == 0) {
+                postLog(L"下载完成，正在校验文件...");
+                if (!VerifyDownloadedAsset(outputPath, normalizedExpectedDigest, lastDigest)) {
+                    DeleteFileW(outputPath.c_str());
+                    postLog(lastDigest.empty() ? L"校验失败，尝试下一条线路" : L"SHA-256 不匹配，尝试下一条线路", true);
+                    continue;
+                }
+
                 downloaded = true;
-                postLog(L"下载完成，准备替换程序...");
+                postLog(L"校验通过，准备替换程序...");
                 break;
             }
             postLog(L"下载失败，尝试下一条线路", true);
@@ -431,6 +633,7 @@ ReleaseInfo FocusClockApp::ParseReleaseInfo(const std::wstring& text) {
         size_t objectStart = text.rfind(L'{', urlPos);
         if (objectStart != std::wstring::npos) {
             TryParseJsonStringField(text, L"name", info.assetName, objectStart);
+            TryParseJsonStringField(text, L"digest", info.assetDigest, objectStart);
         }
     }
 
