@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
 
+if(POLICY CMP0091)
+    cmake_policy(SET CMP0091 NEW)
+endif()
+
 project(FocusClock LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -31,6 +35,9 @@ if(MINGW)
 endif()
 
 if(MSVC)
+    set_property(TARGET FocusClock PROPERTY
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+    )
     target_compile_options(FocusClock PRIVATE /utf-8)
 endif()
 
